@@ -8,6 +8,7 @@ from googleapiclient.http import MediaIoBaseDownload
 # ⚙️ 【主程序置顶配置区】
 # ==============================================================================
 RULES_TAB_NAME  = "config"         
+# 🌟 动态获取 Streamlit 传进来的 Sheet Tab 名称，不死板绑定
 SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script")        
 SHEET_URL       = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 
@@ -18,7 +19,7 @@ TEMP_DIR          = "temp_workspace"
 OUTPUT_VIDEO_NAME = "final_output.mp4"
 
 # 严格限定的 5 种合法章节类型
-VALID_CHAPTERS = {"片头", "片尾", "结尾", "男配音", "女配音", "转场"}
+VALID_CHAPTERS = {"片头", "转场", "结尾", "男配音", "女配音"}
 
 # ==============================================================================
 # 🔐 1. Google API 鉴权与下载中心 
@@ -59,10 +60,10 @@ def download_file_from_gdrive(file_id_or_url, output_path):
     return output_path
 
 # ==============================================================================
-# ✂️ 2. 标点符号自动断句与翻译模块
+# ✂️ 2. 标点符号自动断句与实时翻译模块
 # ==============================================================================
 def wrap_text_by_punctuation(text, max_len=18):
-    """优先在标点符号停顿处换行，保证停顿语义对齐"""
+    """优先在标点符号停顿处换行，保证语义与配音停顿对齐"""
     if not text or len(text) <= max_len:
         return text or ""
 
@@ -98,7 +99,7 @@ def wrap_text_by_punctuation(text, max_len=18):
     return "\n".join(lines)
 
 def translate_to_english(text):
-    """系统自动将中文台词实时翻译为英文字幕"""
+    """自动将中文台词实时翻译为英文字幕"""
     if not text or not text.strip():
         return ""
     try:
@@ -111,8 +112,23 @@ def translate_to_english(text):
         return ""
 
 # ==============================================================================
-# 🛠️ 3. Google 表格数据解析器（精准提取 5 种章节类型）
+# 🛠️ 3. 三级级联属性读取器（Script > Style > Global 默认）
 # ==============================================================================
+def get_cascade_param(key, script_clip, style_cfg, global_cfg, default=""):
+    """
+    优先级：
+    1. Script 单行指定 (最高)
+    2. Config 章节样式 (style_cfg)
+    3. Config 全局配置 (global_cfg 兜底默认)
+    """
+    if script_clip and script_clip.get(key):
+        return str(script_clip[key]).strip()
+    if style_cfg and style_cfg.get(key):
+        return str(style_cfg[key]).strip()
+    if global_cfg and global_cfg.get(key):
+        return str(global_cfg[key]).strip()
+    return default
+
 def parse_rules_tab(csv_text):
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
@@ -130,12 +146,6 @@ def parse_rules_tab(csv_text):
         else:
             styles_cfg[obj_name] = row_dict
             
-    # 兼容“片尾”与“结尾”的别名映射
-    if "结尾" in styles_cfg and "片尾" not in styles_cfg:
-        styles_cfg["片尾"] = styles_cfg["结尾"]
-    elif "片尾" in styles_cfg and "结尾" not in styles_cfg:
-        styles_cfg["结尾"] = styles_cfg["片尾"]
-        
     return global_cfg, styles_cfg
 
 def parse_script_tab(csv_text):
@@ -150,7 +160,7 @@ def parse_script_tab(csv_text):
         
         chapter = row_dict.get("章节", "").strip()
         
-        # 🌟 只保留定义的 5 种章节（片头、片尾、结尾、男配音、女配音、转场），其他非剧本行全部过滤
+        # 🌟 仅保留定义的 5 种章节，其他非剧本行全部抛弃
         if chapter not in VALID_CHAPTERS:
             continue
         
@@ -179,37 +189,29 @@ def parse_script_tab(csv_text):
     return clips
 
 # ==============================================================================
-# 🎬 4. 素材处理与 FFmpeg 渲染引擎
+# 🎬 4. 素材处理与 FFmpeg 双层视觉叠加渲染
 # ==============================================================================
-def get_clip_background(clip, style_cfg, global_cfg):
-    asset = (
-        clip.get("bg_layer1") or 
-        clip.get("bg_layer0") or 
-        style_cfg.get("挂件素材-layer1") or 
-        style_cfg.get("挂件-layer1") or 
-        style_cfg.get("默认素材-layer0") or 
-        global_cfg.get("默认素材-layer0", "")
-    ).strip()
-    
-    if not asset:
+def resolve_asset_path(asset_str):
+    """解析素材资源路径（Drive 链接 / 本地文件 / Pixabay 检索）"""
+    if not asset_str:
         return ""
         
-    is_gdrive_id = bool(re.match(r'^[a-zA-Z0-9_-]{25,50}$', asset))
-    if "drive.google.com" in asset or is_gdrive_id:
-        dl_path = f"{TEMP_DIR}/gdrive_{abs(hash(asset))}.mp4"
+    is_gdrive_id = bool(re.match(r'^[a-zA-Z0-9_-]{25,50}$', asset_str))
+    if "drive.google.com" in asset_str or is_gdrive_id:
+        dl_path = f"{TEMP_DIR}/gdrive_{abs(hash(asset_str))}.mp4"
         if not os.path.exists(dl_path):
-            download_file_from_gdrive(asset, dl_path)
+            download_file_from_gdrive(asset_str, dl_path)
         return dl_path
         
-    if os.path.exists(asset):
-        return asset
+    if os.path.exists(asset_str):
+        return asset_str
         
-    if PIXABAY_API_KEY and not asset.endswith(".mp4") and not asset.endswith(".png") and not asset.endswith(".jpg"):
-        dl_path = f"{TEMP_DIR}/px_{abs(hash(asset))}.mp4"
+    if PIXABAY_API_KEY and not asset_str.endswith(".mp4") and not asset_str.endswith(".png") and not asset_str.endswith(".jpg"):
+        dl_path = f"{TEMP_DIR}/px_{abs(hash(asset_str))}.mp4"
         if os.path.exists(dl_path):
             return dl_path
         try:
-            px_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={urllib.parse.quote(asset)}&per_page=3"
+            px_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={urllib.parse.quote(asset_str)}&per_page=3"
             res = requests.get(px_url, timeout=10).json()
             hits = res.get("hits", [])
             if hits:
@@ -219,39 +221,22 @@ def get_clip_background(clip, style_cfg, global_cfg):
                     f.write(v_res.content)
                 return dl_path
         except Exception as e:
-            print(f"⚠️ Pixabay 检索 '{asset}' 失败: {e}")
+            print(f"⚠️ Pixabay 检索 '{asset_str}' 失败: {e}")
             
-    return ""
-
-def get_bgm_path(style_cfg, global_cfg):
-    bgm_asset = (style_cfg.get("BGM垫音") or global_cfg.get("BGM垫音") or style_cfg.get("BGM") or global_cfg.get("BGM") or "").strip()
-    if not bgm_asset:
-        return ""
-    if "drive.google.com" in bgm_asset or bool(re.match(r'^[a-zA-Z0-9_-]{25,50}$', bgm_asset)):
-        dl_path = f"{TEMP_DIR}/bgm_{abs(hash(bgm_asset))}.mp3"
-        if not os.path.exists(dl_path):
-            download_file_from_gdrive(bgm_asset, dl_path)
-        return dl_path
-    if os.path.exists(bgm_asset):
-        return bgm_asset
     return ""
 
 async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_path):
     spoken_text = clip["spoken_text"] or clip["silent_text"]
     
     if spoken_text:
-        voice = style_cfg.get("配音-音色代号", "").strip() or global_cfg.get("配音-音色代号", "").strip() or "zh-CN-XiaoxiaoNeural"
+        voice = get_cascade_param("配音-音色代号", clip, style_cfg, global_cfg, default="zh-CN-XiaoxiaoNeural")
+        rate_raw = get_cascade_param("配音-语速", clip, style_cfg, global_cfg, default="1.0")
         
-        # 严格按表格中的【配音-语速】数值计算，无硬编码
-        rate_raw = style_cfg.get("配音-语速") or global_cfg.get("配音-语速")
-        if rate_raw:
-            try:
-                rate_val = float(rate_raw)
-                pct = int(round((rate_val - 1.0) * 100))
-                rate_param = f"+{pct}%" if pct >= 0 else f"{pct}%"
-            except Exception:
-                rate_param = "+0%"
-        else:
+        try:
+            rate_val = float(rate_raw)
+            pct = int(round((rate_val - 1.0) * 100))
+            rate_param = f"+{pct}%" if pct >= 0 else f"{pct}%"
+        except Exception:
             rate_param = "+0%"
             
         await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(audio_output_path)
@@ -264,15 +249,15 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         subprocess.run(cmd, capture_output=True, check=True)
 
 def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
-    cn_font_size = style_cfg.get("文字-字号") or global_cfg.get("文字-字号") or "45"
-    font_color = style_cfg.get("文字-颜色") or global_cfg.get("文字-颜色") or "white"
+    cn_font_size = get_cascade_param("文字-字号", clip, style_cfg, global_cfg, default="45")
+    font_color = get_cascade_param("文字-颜色", clip, style_cfg, global_cfg, default="white")
+    is_bilingual = (get_cascade_param("双语字幕", clip, style_cfg, global_cfg, default="关闭") == "开启")
     
-    # 全局开关判断是否翻译并绘制英文双语字幕
-    is_bilingual = (global_cfg.get("双语字幕", "").strip() == "开启")
-    
+    # 获取中文文本与标点符号断句
     cn_text_raw = clip["silent_text"] if clip["silent_text"] else clip["spoken_text"]
     cn_text = wrap_text_by_punctuation(cn_text_raw, max_len=18)
     
+    # 自动生成同屏第二行英文字幕
     en_text = ""
     if is_bilingual:
         translated_en = translate_to_english(cn_text_raw)
@@ -286,21 +271,55 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     cn_sub_clean = os.path.abspath(cn_sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
     cmd = ["ffmpeg", "-y"]
-    bg_path = get_clip_background(clip, style_cfg, global_cfg)
     
-    if bg_path and os.path.exists(bg_path):
-        cmd.extend(["-stream_loop", "-1", "-i", bg_path]) 
+    # 🌟 解析 Layer 0 (背景) 与 Layer 1 (上层挂件/遮罩) 素材
+    raw_l0 = get_cascade_param("默认素材-layer0", clip, style_cfg, global_cfg, default="")
+    raw_l1 = get_cascade_param("挂件素材-layer1", clip, style_cfg, global_cfg, default="")
+    if not raw_l1:
+        raw_l1 = get_cascade_param("挂件-layer1", clip, style_cfg, global_cfg, default="")
+
+    path_l0 = resolve_asset_path(raw_l0)
+    path_l1 = resolve_asset_path(raw_l1)
+
+    # 1. 输入 Layer 0 背景
+    if path_l0 and os.path.exists(path_l0):
+        cmd.extend(["-stream_loop", "-1", "-i", path_l0])
     else:
         cmd.extend(["-f", "lavfi", "-i", "color=c=black:s=1920x1080"])
 
+    # 2. 如果存在 Layer 1 挂件，作为额外画面流输入
+    has_layer1 = bool(path_l1 and os.path.exists(path_l1))
+    if has_layer1:
+        cmd.extend(["-stream_loop", "-1", "-i", path_l1])
+
+    # 3. 输入音频轨
     cmd.extend(["-i", audio_file])
     
-    bgm_path = get_bgm_path(style_cfg, global_cfg)
-    has_bgm = bool(bgm_path and os.path.exists(bgm_path))
+    # 4. 输入 BGM 垫音轨
+    raw_bgm = get_cascade_param("BGM垫音", clip, style_cfg, global_cfg, default="")
+    path_bgm = resolve_asset_path(raw_bgm)
+    has_bgm = bool(path_bgm and os.path.exists(path_bgm))
     if has_bgm:
-        cmd.extend(["-stream_loop", "-1", "-i", bgm_path])
+        cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
 
-    # 绘制字幕滤镜
+    # 🌟 构筑 FFmpeg 视频滤镜：处理 Layer 0 底图 + Layer 1 上层挂件叠加
+    if has_layer1:
+        # Layer 0 底图放底层 [bg_base]，Layer 1 挂件放上层 [l1]，通过 overlay 叠加合并为 [bg]
+        filter_chain = (
+            f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg_base];"
+            f"[1:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[l1];"
+            f"[bg_base][l1]overlay=0:0[bg];"
+        )
+        audio_in_idx = 2
+        bgm_in_idx = 3
+    else:
+        filter_chain = (
+            f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg];"
+        )
+        audio_in_idx = 1
+        bgm_in_idx = 2
+
+    # 🌟 绘制同屏中英双语字幕（一行中文，一行英文，上下排布）
     if is_bilingual and en_text:
         en_sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}_en.txt")
         with open(en_sub_file, "w", encoding="utf-8") as f:
@@ -309,25 +328,23 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         
         en_font_size = max(20, int(int(cn_font_size) * 0.55))
         
-        filter_chain = (
-            f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg];"
+        filter_chain += (
             f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{cn_sub_clean}':fontcolor={font_color}:fontsize={cn_font_size}:line_spacing=12:x=(W-w)/2:y=H-180[v1];"
             f"[v1]drawtext=fontfile='{font_path_clean}':textfile='{en_sub_clean}':fontcolor={font_color}:fontsize={en_font_size}:line_spacing=8:x=(W-w)/2:y=H-90[outv];"
         )
     else:
-        filter_chain = (
-            f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg];"
+        filter_chain += (
             f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{cn_sub_clean}':fontcolor={font_color}:fontsize={cn_font_size}:line_spacing=12:x=(W-w)/2:y=H-text_h-100[outv];"
         )
 
-    # 读取表格中的 BGM 音量配置进行混音
-    bgm_vol = style_cfg.get("BGM音量") or global_cfg.get("BGM音量")
+    # 🌟 精准混合 BGM 音轨（按表格层级继承读取到的实际数值）
+    bgm_vol = get_cascade_param("BGM音量", clip, style_cfg, global_cfg, default="")
     if has_bgm and bgm_vol:
-        filter_chain += f"[1:a]volume=1.0[a_tts];[2:a]volume={bgm_vol}[a_bgm];[a_tts][a_bgm]amix=inputs=2:duration=first[outa]"
+        filter_chain += f"[{audio_in_idx}:a]volume=1.0[a_tts];[{bgm_in_idx}:a]volume={bgm_vol}[a_bgm];[a_tts][a_bgm]amix=inputs=2:duration=first[outa]"
     elif has_bgm:
-        filter_chain += f"[1:a]volume=1.0[a_tts];[2:a]volume=1.0[a_bgm];[a_tts][a_bgm]amix=inputs=2:duration=first[outa]"
+        filter_chain += f"[{audio_in_idx}:a]volume=1.0[a_tts];[{bgm_in_idx}:a]volume=1.0[a_bgm];[a_tts][a_bgm]amix=inputs=2:duration=first[outa]"
     else:
-        filter_chain += f"[1:a]volume=1.0[outa]"
+        filter_chain += f"[{audio_in_idx}:a]volume=1.0[outa]"
 
     cmd.extend([
         "-filter_complex", filter_chain,
@@ -355,9 +372,9 @@ async def main():
     clips = parse_script_tab(script_csv)
     
     if not clips:
-        raise ValueError("❌ 未在表格中解析出任何有效剧本内容，请确认章节包含片头/片尾/男配音/女配音/转场。")
+        raise ValueError(f"❌ 未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容，请检查表格。")
     
-    drive_font_url = global_cfg.get("字体", "").strip()
+    drive_font_url = get_cascade_param("字体", {}, {}, global_cfg)
     if not drive_font_url:
         raise ValueError("❌ 错误：全局配置中未找到【字体】链接！")
         
