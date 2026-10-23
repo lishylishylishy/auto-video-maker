@@ -1,59 +1,43 @@
-# 🎬 GitHub Actions 云端渲染工作流配置文件 (作用：定义云端虚拟机的开机环境、依赖安装、参数接收与主程序调用)
+# 🎬 GitHub Actions 云端渲染工作流配置文件
 
-# 1. 流程的大标题（仅用于在 GitHub 网页 Actions 页面中显示）
 name: Render Video Pipeline
 
-# 2. 触发条件定义：设置为由外部 API 或网页按钮手动触发 (workflow_dispatch)
+# 2. 触发条件定义：最简单的手动触发，不需要任何必填参数！
 on:
   workflow_dispatch:
-    inputs:
-      # 定义接收的参数名：sheet_url (必须与 Streamlit app.py 传递的参数名一致)
-      sheet_url:
-        description: 'https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit?gid=0#gid=0' # 在 GitHub 界面上手动点击时显示的输入框提示文字
-        required: true                       # 设置为必填项
 
-# 3. 任务作业定义区域
 jobs:
-  # 定义 1 个叫 render 的作业任务（代号 render，可自定义，系统内部使用）
   render:
-    runs-on: ubuntu-latest                  # 指定分配一台最新版 Ubuntu Linux 系统的云端虚拟机
+    runs-on: ubuntu-latest
 
-    # 4. 虚拟机启动后，从上到下按顺序执行的步骤清单 (steps)
     steps:
-      # --- 步骤 1：拉取代码 ---
-      - name: 1. 检出仓库代码                   # 步骤名：给人类看的日志标题
-        uses: actions/checkout@v3             # 调用 GitHub 官方插件：把当前仓库里的 main.py 等文件下载到云端虚拟机
+      - name: 1. 检出仓库代码
+        uses: actions/checkout@v3
 
-      # --- 步骤 2：配置 Python 环境 ---
-      - name: 2. 配置 Python 环境               # 步骤名：给人类看的日志标题
-        uses: actions/setup-python@v4         # 调用官方 Python 安装插件
+      - name: 2. 配置 Python 环境
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.10'              # 在云端虚拟机上安装 Python 3.10 版本
+          python-version: '3.10'
 
-      # --- 步骤 3：安装视频剪辑核心软件 FFmpeg ---
-      - name: 3. 安装 FFmpeg 剪辑工具           # 步骤名：给人类看的日志标题
-        run: |                                # run 表示直接在云端 Linux 终端黑框框里执行命令
-          sudo apt-get update                 # 更新 Linux 系统的软件源列表
-          sudo apt-get install -y ffmpeg      # 静默安装 FFmpeg 视频合成处理引擎
+      - name: 3. 安装 FFmpeg 剪辑工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
-      # --- 步骤 4：安装 Python 依赖库 ---
-      - name: 4. 安装 Python 依赖             # 步骤名：给人类看的日志标题
-        run: |                                # 执行终端命令
-          pip install -r requirements.txt     # 读取仓库里的 requirements.txt，自动安装 requests 和 edge-tts
+      - name: 4. 安装 Python 依赖
+        run: |
+          pip install -r requirements.txt
 
-      # --- 步骤 5：运行 Python 主程序开始剪辑 ---
-      - name: 5. 运行 Python 视频合成主程序      # 步骤名：给人类看的日志标题
-        env:                                  # 环境变量注入区域：将外部传入的参数绑定到虚拟机环境变量中
-          # 将输入的 sheet_url 绑定为环境变量 SHEET_URL，供 main.py 中的 os.getenv("SHEET_URL") 读取
-          SHEET_URL: ${{ github.event.inputs.sheet_url }}# 将输入的 sheet_url 绑定为环境变量 SHEET_URL，供 main.py 中的 os.getenv("SHEET_URL") 读取
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}# 👈 PIXABAY_API_KEY 凭证
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }} # 👈  Google 凭证
-        run: |                                # 执行终端命令
-          python main.py                      # 启动主程序，main.py 会去读取上述环境变量并进行音视频渲染
+      - name: 5. 运行 Python 视频合成主程序
+        env:
+          # 只需要注入这两个秘钥，SHEET_URL 已经在 main.py 里写死了，这里不用传！
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          python main.py
 
-      # --- 步骤 6：保存并导出合成好的成品视频 ---
-      - name: 6. 保存导出成品视频               # 步骤名：给人类看的日志标题
-        uses: actions/upload-artifact@v3      # 调用 GitHub 官方的文件上传插件
+      - name: 6. 保存导出成品视频
+        uses: actions/upload-artifact@v3
         with:
-          name: Rendered-Video-Output         # 导出的压缩包名称（可在 GitHub Actions 页面直接点击下载）
-          path: "*.mp4"                       # 自动抓取 main.py 渲染导出出来的所有 mp4 格式视频文件
+          name: Rendered-Video-Output
+          path: "*.mp4"
