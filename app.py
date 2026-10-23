@@ -30,7 +30,7 @@ if st.button("🚀 一键开始制作视频", use_container_width=True):
         "Accept": "application/vnd.github.v3+json",
         "Authorization": f"token {GITHUB_TOKEN}"
     }
-    payload = {"ref": "master"} # 触发主分支
+    payload = {"ref": "main"} # 触发主分支
     
     with st.spinner("🚀 正在唤醒云端服务器，准备渲染..."):
         resp = requests.post(dispatch_url, headers=headers, json=payload)
