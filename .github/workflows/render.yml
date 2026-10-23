@@ -9,7 +9,7 @@ on:
     inputs:
       # 定义接收的参数名：sheet_url (必须与 Streamlit app.py 传递的参数名一致)
       sheet_url:
-        description: 'Google Sheet 链接或ID' # 在 GitHub 界面上手动点击时显示的输入框提示文字
+        description: 'https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit?gid=0#gid=0' # 在 GitHub 界面上手动点击时显示的输入框提示文字
         required: true                       # 设置为必填项
 
 # 3. 任务作业定义区域
