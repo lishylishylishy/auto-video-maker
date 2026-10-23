@@ -4,7 +4,31 @@ import time
 import zipfile
 import io
 import os
+import streamlit as st
+import streamlit.components.v1 as components
 
+# ==========================================
+# 📝 剧本与配置编辑区
+# ==========================================
+st.markdown("### 📝 剧本与素材配置")
+
+# 请将这里的链接替换为你真实的 Google Sheet 完整链接
+# 注意：链接最好包含 /edit?gid=xxx，这样点击能直接定位到特定的 Tab（比如 Script 页）
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit#gid=Script"
+
+col1, col2 = st.columns([2, 1])
+with col1:
+    st.info("💡 建议直接在 Google Sheet 原生界面编辑，排版不易错乱。")
+with col2:
+    # 增加一个醒目的跳转按钮
+    st.link_button("👉 点击跳转到 Google Sheet 编辑", SHEET_URL, use_container_width=True)
+
+# 提供一个折叠面板，允许直接在当前 Streamlit 网页内嵌显示和编辑
+with st.expander("👀 或在当前网页内嵌查看/编辑表格", expanded=False):
+    # 使用 iframe 嵌入 Google Sheet。只要你的浏览器登录了 Google 账号且有权限，就可以直接在这里打字编辑
+    components.iframe(SHEET_URL, height=600, scrolling=True)
+    
+st.divider() # 加一条分割线，区分功能区
 # ==========================================
 # ⚙️ 网页控制台配置区
 # ==========================================
