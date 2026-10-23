@@ -58,7 +58,7 @@ def download_file_from_gdrive(file_id_or_url, output_path):
     return output_path
 
 # ==============================================================================
-# 🛠️ 2. Google 表格数据解析器（精准对齐对应字段）
+# 🛠️ 2. Google 表格数据解析器（加入严格说明行拦截）
 # ==============================================================================
 def parse_rules_tab(csv_text):
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
@@ -78,7 +78,7 @@ def parse_rules_tab(csv_text):
             styles_cfg[obj_name] = row_dict
     return global_cfg, styles_cfg
 
-def parse_script_tab(csv_text):
+def parse_script_tab(csv_text, valid_chapters):
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
     if not rows: return []
@@ -89,7 +89,10 @@ def parse_script_tab(csv_text):
         row_dict = {header[i]: row[i].strip() for i in range(len(header)) if i < len(row)}
         
         chapter = row_dict.get("章节", "").strip()
-        if "说明" in chapter or "【" in chapter or "提示" in chapter: continue
+        
+        # 🌟 核心拦截 1：章节名称必须匹配 config 表中定义过的样式，否则视为说明行跳过
+        if not chapter or chapter not in valid_chapters:
+            continue
         
         bg_layer0 = row_dict.get("默认素材-layer0", "").strip()
         bg_layer1 = row_dict.get("挂件素材-layer1", "").strip()
@@ -97,7 +100,6 @@ def parse_script_tab(csv_text):
         silent_text = row_dict.get("无声文字", "").strip()
         spoken_text = row_dict.get("有声文字", "").strip()
         
-        # 跳过空行
         if not spoken_text and not silent_text and not bg_layer0 and not bg_layer1:
             continue
             
@@ -133,8 +135,9 @@ def get_clip_background(clip, style_cfg, global_cfg):
     if not asset:
         return ""
         
-    # 1. Drive 链接/ID
-    if "drive.google.com" in asset or (len(asset) >= 25 and "/" not in asset and " " not in asset):
+    # 🌟 核心拦截 2：严格判断 Drive 链接或纯英文字符 ID（防止中文长句子被误判为 ID）
+    is_gdrive_id = bool(re.match(r'^[a-zA-Z0-9_-]{25,50}$', asset))
+    if "drive.google.com" in asset or is_gdrive_id:
         dl_path = f"{TEMP_DIR}/gdrive_{abs(hash(asset))}.mp4"
         if not os.path.exists(dl_path):
             download_file_from_gdrive(asset, dl_path)
@@ -165,11 +168,9 @@ def get_clip_background(clip, style_cfg, global_cfg):
     return ""
 
 async def generate_audio_or_silent(clip, style_cfg, audio_output_path):
-    """根据有声文字生成 TTS，无有声文字则按【章节秒数】生成静音轨"""
     spoken_text = clip["spoken_text"]
     
     if spoken_text:
-        # 从 config 表读取音色与语速
         voice = style_cfg.get("配音-音色代号", "").strip() or "zh-CN-XiaoxiaoNeural"
         rate_raw = style_cfg.get("配音-语速", "1.0").strip()
         try:
@@ -181,7 +182,6 @@ async def generate_audio_or_silent(clip, style_cfg, audio_output_path):
             
         await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(audio_output_path)
     else:
-        # 无配音时，使用【章节秒数】作为时长，默认 3 秒
         dur = clip["duration"] if clip["duration"] else 3.0
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
@@ -190,11 +190,9 @@ async def generate_audio_or_silent(clip, style_cfg, audio_output_path):
         subprocess.run(cmd, capture_output=True, check=True)
 
 def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
-    # 字号与颜色读取
     font_size = style_cfg.get("文字-字号") or global_cfg.get("文字-字号") or "50"
     font_color = style_cfg.get("文字-颜色") or global_cfg.get("文字-颜色") or "white"
     
-    # 优先显示【无声文字】标题，若为空则显示【有声文字】
     display_text = clip["silent_text"] if clip["silent_text"] else clip["spoken_text"]
     
     sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}.txt")
@@ -211,7 +209,6 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
 
     cmd.extend(["-i", audio_file])
     
-    # 对 FFmpeg 路径进行严格安全转义
     font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
     sub_file_clean = os.path.abspath(sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
@@ -243,12 +240,14 @@ async def main():
     script_csv = get_google_sheet_tab_csv(SHEET_URL, SCRIPT_TAB_NAME)
     
     global_cfg, styles_cfg = parse_rules_tab(rules_csv)
-    clips = parse_script_tab(script_csv)
+    
+    # 🌟 将 config 表里定义好的合法章节类型传入解析器
+    valid_chapters = set(styles_cfg.keys())
+    clips = parse_script_tab(script_csv, valid_chapters)
     
     if not clips:
-        raise ValueError("❌ 未在表格中解析出任何有效脚本内容，请检查表格。")
+        raise ValueError("❌ 未在表格中解析出任何有效脚本内容（可能全部被当做说明过滤），请检查表格章节名称。")
     
-    # 字体下载
     drive_font_url = global_cfg.get("字体", "").strip()
     if not drive_font_url:
         raise ValueError("❌ 错误：全局配置中未找到【字体】链接！")
@@ -259,21 +258,16 @@ async def main():
 
     video_segments = []
     
-    # 分段渲染
     for idx, clip in enumerate(clips, 1):
         v_seg = f"{TEMP_DIR}/clip_{idx}.mp4"
         a_seg = f"{TEMP_DIR}/clip_{idx}.m4a"
         
-        # 匹配 config 表对应的章节样式（如 片头、男配音、女配音）
         style_cfg = styles_cfg.get(clip["chapter"], {})
         
-        # 生成配音或静音轨
         await generate_audio_or_silent(clip, style_cfg, a_seg)
-        # 渲染片段
         render_clip(idx, clip, style_cfg, global_cfg, font_path, audio_file=a_seg, output_path=v_seg)
         video_segments.append(v_seg)
 
-    # 拼接校验
     list_file = f"{TEMP_DIR}/concat_list.txt"
     valid_segments = []
     with open(list_file, "w", encoding="utf-8") as f:
@@ -286,7 +280,6 @@ async def main():
     if not valid_segments:
         raise RuntimeError("❌ 没有生成任何有效的视频片段！")
 
-    # FFmpeg 重新编码统一拼接
     concat_cmd = [
         "ffmpeg", "-y",
         "-f", "concat",
