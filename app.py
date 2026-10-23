@@ -9,70 +9,115 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 常规配置
-GITHUB_REPO = os.getenv("GITHUB_REPOSITORY", "your_username/auto-video-maker")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")  # 在 Streamlit Secrets 中配置
-SHEET_EDIT_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
+# 🌟 安全读取配置（优先从 st.secrets 读取，再从环境变量读取，兼容多种命名规则）
+def get_secret(key, default=""):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
 
-# 嵌入视窗网址 (Google Sheets iframe html 格式)
+GITHUB_TOKEN = get_secret("GITHUB_TOKEN", "")
+GITHUB_REPO  = get_secret("GITHUB_REPOSITORY", get_secret("GITHUB_REPO", ""))
+GITHUB_REF   = get_secret("GITHUB_REF", "main")  # 支持自定义分支名 (main / master)
+
+SHEET_EDIT_URL  = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 SHEET_EMBED_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/htmlview"
 
-# 极简 UI 隐藏默认多余元素
+# 🌟 CSS 边距调优 + 隐藏 Streamlit 顶部原生遮挡栏
 st.markdown("""
     <style>
-        .block-container {padding-top: 1rem; padding-bottom: 0rem; padding-left: 2rem; padding-right: 2rem;}
-        iframe {border-radius: 8px; border: 1px solid #ddd;}
+        /* 隐藏顶部原生 Header 栏（Share、Star、Status） */
+        header[data-testid="stHeader"] {
+            display: none !important;
+        }
+        /* 页面顶端保留舒适安全间距 */
+        .block-container {
+            padding-top: 1.2rem !important;
+            padding-bottom: 1rem !important;
+            padding-left: 2rem !important;
+            padding-right: 2rem !important;
+        }
+        iframe {
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
     </style>
 """, unsafe_allow_html=True)
 
-# Helper: 请求 GitHub API 触发渲染
+# Helper: 请求 GitHub API 触发渲染（返回精准错误信息）
 def trigger_github_workflow(tab_name):
+    token = get_secret("GITHUB_TOKEN", "")
+    repo = get_secret("GITHUB_REPOSITORY", get_secret("GITHUB_REPO", ""))
+    ref = get_secret("GITHUB_REF", "main")
+
+    if not token:
+        return False, "未检测到 GITHUB_TOKEN，请在 Streamlit Secrets 中配置。"
+    if not repo or repo == "your_username/auto-video-maker":
+        return False, f"仓库名称未正确配置 (当前: '{repo}')，请在 Streamlit Secrets 中配置 GITHUB_REPOSITORY (例如: 用户名/仓库名)。"
+
     headers = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else ""
+        "Authorization": f"Bearer {token}"
     }
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/render.yml/dispatches"
-    payload = {"ref": "main", "inputs": {"sheet_tab": tab_name}}
-    res = requests.post(url, headers=headers, json=payload)
-    return res.status_code == 204
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/render.yml/dispatches"
+    payload = {"ref": ref, "inputs": {"sheet_tab": tab_name}}
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code == 204:
+            return True, "成功"
+        else:
+            return False, f"GitHub 返回 [{res.status_code}]: {res.text}"
+    except Exception as e:
+        return False, f"网络请求异常: {str(e)}"
 
 # Helper: 自动查询最新运行的任务（支持离线恢复查看结果）
 def get_latest_workflow_run():
+    token = get_secret("GITHUB_TOKEN", "")
+    repo = get_secret("GITHUB_REPOSITORY", get_secret("GITHUB_REPO", ""))
+    
+    if not token or not repo or repo == "your_username/auto-video-maker":
+        return None
+        
     headers = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else ""
+        "Authorization": f"Bearer {token}"
     }
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs?per_page=1"
-    res = requests.get(url, headers=headers)
-    if res.status_code == 200:
-        data = res.json()
-        if data.get("workflow_runs"):
-            return data["workflow_runs"][0]
+    url = f"https://api.github.com/repos/{repo}/actions/runs?per_page=1"
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("workflow_runs"):
+                return data["workflow_runs"][0]
+    except Exception:
+        pass
     return None
 
 # ==============================================================================
-# 📌 侧边控制面板（设置、渲染触发、后台状态与视频保留播放器）
+# 📌 侧边控制面板（设置、渲染触发、后台状态追踪）
 # ==============================================================================
 with st.sidebar:
     st.title("🎬 Studio Control")
     st.markdown("---")
     
-    # 填写的标签页名称
     target_tab = st.text_input("Target Sheet Tab", value="script", help="输入 Google Sheet 底部的 Tab 名称")
     
-    # 渲染控制按钮
     if st.button("🚀 Start Rendering", type="primary", use_container_width=True):
-        if trigger_github_workflow(target_tab):
-            st.success("✅ 云端渲染任务已启动！你可以随时关闭浏览器，后台会自动运行。")
+        ok, msg = trigger_github_workflow(target_tab)
+        if ok:
+            st.success("✅ 云端渲染任务已启动！您可以随时关闭浏览器，后台会自动运行。")
             time.sleep(1)
             st.rerun()
         else:
-            st.error("❌ 启动失败，请检查 GITHUB_TOKEN 配置。")
+            st.error(f"❌ 启动失败：{msg}")
 
     st.markdown("---")
     st.subheader("📡 Live Action Status")
     
-    # 自动异步检查 GitHub Actions 的最新状态（关闭网页重载依然有效！）
     run_info = get_latest_workflow_run()
     if run_info:
         status = run_info.get("status")
@@ -83,14 +128,12 @@ with st.sidebar:
             st.info(f"⏳ **云端渲染中...** ({status})")
             st.progress(50)
             st.caption("您可以关闭此页面，渲染完成后重新打开即可查看视频。")
-            if st.button("🔄 刷新进度"):
+            if st.button("🔄 刷新进度", use_container_width=True):
                 st.rerun()
         elif status == "completed":
             if conclusion == "success":
                 st.success("🎉 **视频渲染成功！**")
-                st.markdown(f"[🔗 查看 GitHub 任务详情]({html_url})")
-                st.markdown("### 📥 渲染成品下载")
-                st.info("提示：成品可通过 GitHub Artifacts 界面或网页右侧查看下载。")
+                st.markdown(f"[🔗 查看 GitHub 任务与下载成品]({html_url})")
             else:
                 st.error(f"❌ 渲染失败，结论: {conclusion}")
                 st.markdown(f"[🔍 点击查看错误日志]({html_url})")
@@ -98,27 +141,17 @@ with st.sidebar:
         st.caption("暂无云端运行记录。")
 
 # ==============================================================================
-# 📊 主界面：表格可视视窗最大化 + 顶部工具条
+# 📊 主界面：最大化表格编辑视窗
 # ==============================================================================
-col_title, col_btn = st.columns([3, 1])
+col_title, col_btn = st.columns([3, 1], vertical_alignment="center")
+
 with col_title:
     st.subheader("📋 Google Sheets 内容在线编辑")
-with col_btn:
-    st.markdown(f'''
-        <a href="{SHEET_EDIT_URL}" target="_blank">
-            <button style="
-                width: 100%;
-                background-color: #4CAF50;
-                color: white;
-                padding: 8px 16px;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-                font-weight: bold;">
-                🔗 新标签页打开表格
-            </button>
-        </a>
-    ''', unsafe_allow_html=True)
 
-# 内嵌嵌入视窗直接放大占满屏幕
-st.components.v1.iframe(SHEET_EMBED_URL, height=730, scrolling=True)
+with col_btn:
+    st.link_button("🔗 在新标签页打开表格", SHEET_EDIT_URL, use_container_width=True)
+
+st.divider()
+
+# 高清内嵌表格视窗（720px 高度填满屏幕）
+st.components.v1.iframe(SHEET_EMBED_URL, height=720, scrolling=True)
