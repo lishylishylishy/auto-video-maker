@@ -58,7 +58,23 @@ def download_file_from_gdrive(file_id_or_url, output_path):
     return output_path
 
 # ==============================================================================
-# 🛠️ 2. Google 表格数据解析器（加入严格说明行拦截）
+# 🌐 2. 轻量自动翻译模块 (中文 -> 英文)
+# ==============================================================================
+def translate_to_english(text):
+    """无需 API Key 的轻量中文转英文翻译"""
+    if not text or not text.strip():
+        return ""
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={urllib.parse.quote(text)}"
+        res = requests.get(url, timeout=5).json()
+        en_text = "".join([item[0] for item in res[0] if item[0]])
+        return en_text.strip()
+    except Exception as e:
+        print(f"⚠️ 自动翻译英文字幕失败 ({text}): {e}")
+        return ""
+
+# ==============================================================================
+# 🛠️ 3. Google 表格数据解析器
 # ==============================================================================
 def parse_rules_tab(csv_text):
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
@@ -90,7 +106,6 @@ def parse_script_tab(csv_text, valid_chapters):
         
         chapter = row_dict.get("章节", "").strip()
         
-        # 🌟 核心拦截 1：章节名称必须匹配 config 表中定义过的样式，否则视为说明行跳过
         if not chapter or chapter not in valid_chapters:
             continue
         
@@ -99,6 +114,7 @@ def parse_script_tab(csv_text, valid_chapters):
         duration_str = row_dict.get("章节秒数", "").strip()
         silent_text = row_dict.get("无声文字", "").strip()
         spoken_text = row_dict.get("有声文字", "").strip()
+        english_text = row_dict.get("英文字幕", "").strip()
         
         if not spoken_text and not silent_text and not bg_layer0 and not bg_layer1:
             continue
@@ -114,15 +130,15 @@ def parse_script_tab(csv_text, valid_chapters):
             "duration": duration,
             "chapter": chapter,
             "silent_text": silent_text,
-            "spoken_text": spoken_text
+            "spoken_text": spoken_text,
+            "english_text": english_text
         })
     return clips
 
 # ==============================================================================
-# 🎬 3. 素材处理与 FFmpeg 渲染引擎
+# 🎬 4. 素材处理与双语 FFmpeg 渲染引擎
 # ==============================================================================
 def get_clip_background(clip, style_cfg, global_cfg):
-    """优先级：挂件素材-layer1 -> 默认素材-layer0 -> 样式配置 -> 全局配置"""
     asset = (
         clip.get("bg_layer1") or 
         clip.get("bg_layer0") or 
@@ -135,7 +151,6 @@ def get_clip_background(clip, style_cfg, global_cfg):
     if not asset:
         return ""
         
-    # 🌟 核心拦截 2：严格判断 Drive 链接或纯英文字符 ID（防止中文长句子被误判为 ID）
     is_gdrive_id = bool(re.match(r'^[a-zA-Z0-9_-]{25,50}$', asset))
     if "drive.google.com" in asset or is_gdrive_id:
         dl_path = f"{TEMP_DIR}/gdrive_{abs(hash(asset))}.mp4"
@@ -143,11 +158,9 @@ def get_clip_background(clip, style_cfg, global_cfg):
             download_file_from_gdrive(asset, dl_path)
         return dl_path
         
-    # 2. 本地相对路径
     if os.path.exists(asset):
         return asset
         
-    # 3. Pixabay 关键词自动检索
     if PIXABAY_API_KEY and not asset.endswith(".mp4") and not asset.endswith(".png") and not asset.endswith(".jpg"):
         dl_path = f"{TEMP_DIR}/px_{abs(hash(asset))}.mp4"
         if os.path.exists(dl_path):
@@ -190,14 +203,27 @@ async def generate_audio_or_silent(clip, style_cfg, audio_output_path):
         subprocess.run(cmd, capture_output=True, check=True)
 
 def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
-    font_size = style_cfg.get("文字-字号") or global_cfg.get("文字-字号") or "50"
+    cn_font_size = int(style_cfg.get("文字-字号") or global_cfg.get("文字-字号") or "45")
     font_color = style_cfg.get("文字-颜色") or global_cfg.get("文字-颜色") or "white"
     
-    display_text = clip["silent_text"] if clip["silent_text"] else clip["spoken_text"]
+    # 判断是否开启双语字幕
+    is_bilingual = global_cfg.get("双语字幕", "").strip() == "开启" or bool(clip["english_text"])
     
-    sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}.txt")
-    with open(sub_file, "w", encoding="utf-8") as f:
-        f.write(display_text)
+    # 1. 确定中文文本
+    cn_text = clip["silent_text"] if clip["silent_text"] else clip["spoken_text"]
+    
+    # 2. 确定英文文本 (如表格中有直接读取，否则自动翻译)
+    en_text = ""
+    if is_bilingual:
+        en_text = clip["english_text"] if clip["english_text"] else translate_to_english(cn_text)
+
+    # 写入中英文字幕临时文件
+    cn_sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}_cn.txt")
+    with open(cn_sub_file, "w", encoding="utf-8") as f:
+        f.write(cn_text)
+
+    font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
+    cn_sub_clean = os.path.abspath(cn_sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
     cmd = ["ffmpeg", "-y"]
     bg_path = get_clip_background(clip, style_cfg, global_cfg)
@@ -208,14 +234,26 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         cmd.extend(["-f", "lavfi", "-i", "color=c=black:s=1920x1080"])
 
     cmd.extend(["-i", audio_file])
-    
-    font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
-    sub_file_clean = os.path.abspath(sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
-    filter_chain = (
-        f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg];"
-        f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{sub_file_clean}':fontcolor={font_color}:fontsize={font_size}:x=(W-w)/2:y=H-text_h-100[outv]"
-    )
+    # 根据是否开启双语字幕构建 FFmpeg Filter Chain
+    if is_bilingual and en_text:
+        en_sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}_en.txt")
+        with open(en_sub_file, "w", encoding="utf-8") as f:
+            f.write(en_text)
+        en_sub_clean = os.path.abspath(en_sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
+        
+        en_font_size = max(20, int(cn_font_size * 0.55))
+        
+        filter_chain = (
+            f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg];"
+            f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{cn_sub_clean}':fontcolor={font_color}:fontsize={cn_font_size}:x=(W-w)/2:y=H-150[v1];"
+            f"[v1]drawtext=fontfile='{font_path_clean}':textfile='{en_sub_clean}':fontcolor={font_color}:fontsize={en_font_size}:x=(W-w)/2:y=H-80[outv]"
+        )
+    else:
+        filter_chain = (
+            f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg];"
+            f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{cn_sub_clean}':fontcolor={font_color}:fontsize={cn_font_size}:x=(W-w)/2:y=H-text_h-100[outv]"
+        )
 
     cmd.extend([
         "-filter_complex", filter_chain,
@@ -231,7 +269,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         raise subprocess.CalledProcessError(res.returncode, cmd, output=res.stdout, stderr=res.stderr)
 
 # ==============================================================================
-# 🚀 4. 主程序入口
+# 🚀 5. 主程序入口
 # ==============================================================================
 async def main():
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -241,12 +279,11 @@ async def main():
     
     global_cfg, styles_cfg = parse_rules_tab(rules_csv)
     
-    # 🌟 将 config 表里定义好的合法章节类型传入解析器
     valid_chapters = set(styles_cfg.keys())
     clips = parse_script_tab(script_csv, valid_chapters)
     
     if not clips:
-        raise ValueError("❌ 未在表格中解析出任何有效脚本内容（可能全部被当做说明过滤），请检查表格章节名称。")
+        raise ValueError("❌ 未在表格中解析出任何有效脚本内容，请检查表格章节名称。")
     
     drive_font_url = global_cfg.get("字体", "").strip()
     if not drive_font_url:
