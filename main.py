@@ -84,13 +84,36 @@ def parse_script_tab(csv_text):
     for row in rows[1:]:
         if not row: continue
         row_dict = {header[i]: row[i].strip() for i in range(len(header)) if i < len(row)}
-        text = row_dict.get("台词文本", "").strip()
+        
+        # 🌟 兼容多种表头命名：“有声文字”、“台词文本”、“台词”、“文本”
+        text = (
+            row_dict.get("有声文字") or 
+            row_dict.get("台词文本") or 
+            row_dict.get("台词") or 
+            row_dict.get("文本", "")
+        ).strip()
+        
         if not text or text.startswith("#"): continue
+
+        # 🌟 兼容多种背景列表头：“背景指定”、“默认素材-layer0”、“背景素材”
+        bg_asset = (
+            row_dict.get("背景指定") or 
+            row_dict.get("默认素材-layer0") or 
+            row_dict.get("背景素材", "")
+        ).strip()
+
+        # 🌟 兼容样式/章节列表头
+        style_tag = (
+            row_dict.get("样式标签") or 
+            row_dict.get("章节") or 
+            "默认正文"
+        ).strip()
+
         clips.append({
             "type": row_dict.get("类型", "speech").strip(),
-            "style_tag": row_dict.get("样式标签", "默认正文").strip(),
+            "style_tag": style_tag,
             "text": text,
-            "bg_asset": row_dict.get("背景指定", "").strip()
+            "bg_asset": bg_asset
         })
     return clips
 
