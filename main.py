@@ -8,7 +8,7 @@ from googleapiclient.http import MediaIoBaseDownload
 # ⚙️ 【主程序置顶配置区】
 # ==============================================================================
 RULES_TAB_NAME    = "config"          
-SCRIPT_TAB_NAME   = "script"          
+SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script")        
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit?gid=0#gid=0"# 👇 你的私密表格链接死编码写在这里！程序直接读这个，不需要到处传参了
 
 # 密钥继续从 GitHub Actions 安全环境读取
