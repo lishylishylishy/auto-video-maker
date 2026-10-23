@@ -13,7 +13,7 @@ DEFAULT_FONT_PATH = "materials/font.ttf" # 默认字体保存/读取路径
 OUTPUT_VIDEO_NAME = "final_output.mp4"   # 导出的成品视频文件名
 
 # 从 GitHub Actions 环境变量中安全读取由 Streamlit 传入的数据
-SHEET_URL       = os.getenv("https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit?gid=1021784972#gid=1021784972", "")
+SHEET_URL       = os.getenv("SHEET_URL", "")
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
 GCP_SA_KEY      = os.getenv("GCP_SA_KEY", "") # 👈 新增：读取我们刚配置好的 Google 密钥
 
