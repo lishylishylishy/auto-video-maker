@@ -151,9 +151,9 @@ async def main():
     clips = parse_script_tab(script_csv)
     
     # 强制要求表格中必须填写 Drive 字体链接
-    drive_font_url = global_cfg.get("全局字体素材", "").strip()
+    drive_font_url = global_cfg.get("字体", "").strip()
     if not drive_font_url:
-        raise ValueError("❌ 错误：你的 config 表格中没有填写【全局字体素材】的 Google Drive 链接！程序无法渲染中文字幕。")
+        raise ValueError("❌ 错误：你的 config 表格中没有填写【字体】的 Google Drive 链接！程序无法渲染中文字幕。")
         
     font_path = f"{TEMP_DIR}/custom_font.ttf"
     if not os.path.exists(font_path):
