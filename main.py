@@ -7,15 +7,15 @@ from googleapiclient.http import MediaIoBaseDownload
 # ==============================================================================
 # ⚙️ 【主程序置顶配置区】
 # ==============================================================================
-RULES_TAB_NAME    = "config"          
+RULES_TAB_NAME  = "config"         
 SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script")        
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit?gid=0#gid=0"# 👇 你的私密表格链接死编码写在这里！程序直接读这个，不需要到处传参了
+SHEET_URL       = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 
 # 密钥继续从 GitHub Actions 安全环境读取
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
 GCP_SA_KEY      = os.getenv("GCP_SA_KEY", "")
 
-TEMP_DIR = "temp_workspace"
+TEMP_DIR          = "temp_workspace"
 OUTPUT_VIDEO_NAME = "final_output.mp4"
 
 # ==============================================================================
@@ -43,8 +43,11 @@ def get_google_sheet_tab_csv(sheet_url, tab_name):
     return output.getvalue()
 
 def download_file_from_gdrive(file_id_or_url, output_path):
-    match = re.search(r"(?:/d/|id=)([a-zA-Z0-9-_]+)", file_id_or_url)
-    file_id = match.group(1) if match else file_id_or_url
+    """提取纯净的 Google Drive File ID 并下载"""
+    # 兼容 /file/d/xxx, /d/xxx, id=xxx, folders/xxx 等格式
+    match = re.search(r"(?:/file/d/|/d/|id=|folders/)([a-zA-Z0-9-_]+)", str(file_id_or_url))
+    file_id = match.group(1) if match else str(file_id_or_url).strip()
+    
     creds = get_google_credentials()
     drive_service = build('drive', 'v3', credentials=creds)
     request = drive_service.files().get_media(fileId=file_id)
@@ -95,12 +98,40 @@ def parse_script_tab(csv_text):
 # 🎬 3. 素材拉取与 FFmpeg 合成
 # ==============================================================================
 def get_clip_background(clip_data):
-    bg_asset = clip_data["bg_asset"]
-    if bg_asset and ("drive.google.com" in bg_asset or len(bg_asset) >= 33):
-        dl_path = f"{TEMP_DIR}/gdrive_bg_{hash(bg_asset)}.mp4"
+    """智能选择背景素材：Google Drive 链接 -> 本地文件 -> Pixabay 关键词检索"""
+    bg_asset = clip_data.get("bg_asset", "").strip()
+    if not bg_asset:
+        return ""
+    
+    # 情况 1: Google Drive 链接或纯 File ID
+    if "drive.google.com" in bg_asset or (len(bg_asset) >= 25 and "/" not in bg_asset and " " not in bg_asset):
+        dl_path = f"{TEMP_DIR}/gdrive_bg_{abs(hash(bg_asset))}.mp4"
         if not os.path.exists(dl_path):
             download_file_from_gdrive(bg_asset, dl_path)
         return dl_path
+    
+    # 情况 2: 已存在的本地路径
+    if os.path.exists(bg_asset):
+        return bg_asset
+
+    # 情况 3: Pixabay API 关键词检索
+    if PIXABAY_API_KEY:
+        dl_path = f"{TEMP_DIR}/px_bg_{abs(hash(bg_asset))}.mp4"
+        if os.path.exists(dl_path):
+            return dl_path
+        try:
+            px_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={urllib.parse.quote(bg_asset)}&per_page=3"
+            res = requests.get(px_url, timeout=10).json()
+            hits = res.get("hits", [])
+            if hits:
+                video_url = hits[0]["videos"]["large"]["url"]
+                v_res = requests.get(video_url, timeout=30)
+                with open(dl_path, "wb") as f:
+                    f.write(v_res.content)
+                return dl_path
+        except Exception as e:
+            print(f"⚠️ Pixabay 检索 '{bg_asset}' 失败: {e}")
+
     return ""
 
 async def generate_audio(text, output_path):
@@ -111,7 +142,8 @@ def render_clip(index, clip, style_cfg, font_path, audio_file, output_path):
     font_color = style_cfg.get("字体颜色", "white")
     
     sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}.txt")
-    with open(sub_file, "w", encoding="utf-8") as f: f.write(clip["text"])
+    with open(sub_file, "w", encoding="utf-8") as f: 
+        f.write(clip["text"])
 
     cmd = ["ffmpeg", "-y"]
     bg_path = get_clip_background(clip)
@@ -123,15 +155,19 @@ def render_clip(index, clip, style_cfg, font_path, audio_file, output_path):
 
     cmd.extend(["-i", audio_file])
     
+    # 转义 FFmpeg 路径中的特殊字符，避免 Windows/Linux 路径冒号导致 drawtext 滤镜语法报错
+    font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:")
+    sub_file_clean = os.path.abspath(sub_file).replace("\\", "/").replace(":", "\\:")
+
     filter_chain = (
         f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg];"
-        f"[bg]drawtext=fontfile='{font_path}':textfile='{sub_file}':fontcolor={font_color}:fontsize={font_size}:x=(W-w)/2:y=H-text_h-100[outv]"
+        f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{sub_file_clean}':fontcolor={font_color}:fontsize={font_size}:x=(W-w)/2:y=H-text_h-100[outv]"
     )
 
     cmd.extend([
         "-filter_complex", filter_chain,
         "-map", "[outv]", "-map", "1:a",
-        "-r", "30", "-c:v", "libx264", "-c:a", "aac",
+        "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
         "-shortest", 
         output_path
     ])
@@ -150,10 +186,9 @@ async def main():
     global_cfg, styles_cfg = parse_rules_tab(rules_csv)
     clips = parse_script_tab(script_csv)
     
-    # 强制要求表格中必须填写 Drive 字体链接
     drive_font_url = global_cfg.get("字体", "").strip()
     if not drive_font_url:
-        raise ValueError("❌ 错误：你的 config 表格中没有填写【字体】的 Google Drive 链接！程序无法渲染中文字幕。")
+        raise ValueError("❌ 错误：你的 config 表格中没有填写【字体】的 Google Drive 链接！无法渲染字幕。")
         
     font_path = f"{TEMP_DIR}/custom_font.ttf"
     if not os.path.exists(font_path):
@@ -170,11 +205,32 @@ async def main():
         render_clip(idx, clip, style_cfg, font_path, audio_file=a_seg, output_path=v_seg)
         video_segments.append(v_seg)
 
+    # 5. 校验并写入拼接列表
     list_file = f"{TEMP_DIR}/concat_list.txt"
+    valid_segments = []
     with open(list_file, "w", encoding="utf-8") as f:
-        for seg in video_segments: f.write(f"file '{os.path.abspath(seg)}'\n")
-        
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", OUTPUT_VIDEO_NAME], check=True)
+        for seg in video_segments:
+            if os.path.exists(seg) and os.path.getsize(seg) > 0:
+                clean_path = os.path.abspath(seg).replace("'", "'\\''")
+                f.write(f"file '{clean_path}'\n")
+                valid_segments.append(seg)
+
+    if not valid_segments:
+        raise RuntimeError("❌ 没有生成任何有效的视频片段，无法合成！")
+
+    # 6. 使用显式重编码统一参数，彻底解决拼接报错问题
+    concat_cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", list_file,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        OUTPUT_VIDEO_NAME
+    ]
+    subprocess.run(concat_cmd, check=True)
 
 if __name__ == "__main__":
     import asyncio
