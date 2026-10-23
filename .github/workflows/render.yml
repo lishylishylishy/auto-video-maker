@@ -1,42 +1,43 @@
 # 🎬 GitHub Actions 云端渲染工作流配置文件
-
 name: Render Video Pipeline
 
-# 2. 触发条件定义：最简单的手动触发，不需要任何必填参数！
 on:
   workflow_dispatch:
+    inputs:
+      sheet_tab:
+        description: 'Target Sheet Tab'
+        required: true
+        default: 'script'
 
 jobs:
   render:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 1. 检出仓库代码
-        uses: actions/checkout@v3
+      - name: 1. Checkout
+        uses: actions/checkout@v4
 
-      - name: 2. 配置 Python 环境
-        uses: actions/setup-python@v4
+      - name: 2. Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 3. 安装 FFmpeg 剪辑工具
+      - name: 3. Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: 4. 安装 Python 依赖
-        run: |
-          pip install -r requirements.txt
+      - name: 4. Install Dependencies
+        run: pip install -r requirements.txt
 
-      - name: 5. 运行 Python 视频合成主程序
+      - name: 5. Run Script
         env:
-          # 只需要注入这两个秘钥，SHEET_URL 已经在 main.py 里写死了，这里不用传！
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: |
-          python main.py
+          # 关键：将用户指定的 Tab 名称注入为环境变量
+          TARGET_TAB: ${{ github.event.inputs.sheet_tab }}
+        run: python main.py
 
-      - name: 6. 保存导出成品视频
+      - name: 6. Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Rendered-Video-Output
