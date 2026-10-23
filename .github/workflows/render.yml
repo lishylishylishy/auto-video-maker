@@ -20,24 +20,35 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-# --- 步骤 3：高效快速配置 FFmpeg ---
-      - name: 3. Setup FFmpeg
-        uses: FedericoCarboni/setup-ffmpeg@v3
+
+      # ⚡ 使用精简版 apt 安装全功能 FFmpeg (包含 drawtext 字幕滤镜，10秒极速完成)
+      - name: 3. Setup Complete FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # ⚡ 开启 pip 依赖缓存
+      - name: 4. Cache Python Dependencies
+        uses: actions/cache@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-      - name: 4. Install Dependencies
-        run: pip install -r requirements.txt
+      - name: 5. Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: 5. Run Script
+      - name: 6. Run Script
         env:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          # 关键：将用户指定的 Tab 名称注入为环境变量
           TARGET_TAB: ${{ github.event.inputs.sheet_tab }}
         run: python main.py
 
-      - name: 6. Upload Artifact
+      - name: 7. Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Rendered-Video-Output
