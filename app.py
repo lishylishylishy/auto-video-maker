@@ -10,8 +10,13 @@ import os
 # ==========================================
 # 填入你的 GitHub 信息
 GITHUB_REPO = "lishylishylishy/auto-video-maker"  # 例如: "zhangsan/auto-video"
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "你的_GITHUB_PERSONAL_ACCESS_TOKEN_写这里")
-WORKFLOW_FILE = "render.yml" 
+WORKFLOW_FILE = "render.yml"
+# 🔒 安全读取GITHUB_TOKEN：从 Streamlit 的云端保险箱读取 Token，代码里干干净净
+try:
+    GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+except Exception:
+    st.error("❌ 系统错误：未能在 Streamlit 后台找到 GITHUB_TOKEN，请在 App Settings -> Secrets 中配置。")
+    st.stop()
 
 st.set_page_config(page_title="自动化视频引擎", page_icon="🎬")
 st.title("🎬 自动化视频合成引擎")
