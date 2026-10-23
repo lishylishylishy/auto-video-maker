@@ -45,9 +45,9 @@ jobs:
       - name: 5. 运行 Python 视频合成主程序      # 步骤名：给人类看的日志标题
         env:                                  # 环境变量注入区域：将外部传入的参数绑定到虚拟机环境变量中
           # 将输入的 sheet_url 绑定为环境变量 SHEET_URL，供 main.py 中的 os.getenv("SHEET_URL") 读取
-          SHEET_URL: ${{ github.event.inputs.sheet_url }}
-          # 从 GitHub 仓库后台 Secrets 中安全读取秘钥，绑定为 PIXABAY_API_KEY
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          SHEET_URL: ${{ github.event.inputs.sheet_url }}# 将输入的 sheet_url 绑定为环境变量 SHEET_URL，供 main.py 中的 os.getenv("SHEET_URL") 读取
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}# 👈 PIXABAY_API_KEY 凭证
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }} # 👈  Google 凭证
         run: |                                # 执行终端命令
           python main.py                      # 启动主程序，main.py 会去读取上述环境变量并进行音视频渲染
 
