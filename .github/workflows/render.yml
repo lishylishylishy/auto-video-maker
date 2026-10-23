@@ -1,4 +1,3 @@
-# 🎬 GitHub Actions 云端渲染工作流配置文件
 name: Render Video Pipeline
 
 on:
@@ -21,13 +20,16 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ⚡ 使用精简版 apt 安装全功能 FFmpeg (包含 drawtext 字幕滤镜，10秒极速完成)
-      - name: 3. Setup Complete FFmpeg
+      # ⚡ 使用全功能静态编译包（包含 drawtext 滤镜 + ffprobe），仅下载单文件，5秒极速完成
+      - name: 3. Setup Fast Complete FFmpeg
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz
+          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
+          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+          rm -rf ffmpeg-master-latest-linux64-gpl*
+          ffmpeg -version
 
-      # ⚡ 开启 pip 依赖缓存
       - name: 4. Cache Python Dependencies
         uses: actions/cache@v4
         with:
