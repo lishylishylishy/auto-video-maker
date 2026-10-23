@@ -1,43 +1,78 @@
-import os, re, csv, requests, subprocess, edge_tts, urllib.parse
+import os, re, csv, json, io, requests, subprocess, edge_tts, urllib.parse
+import gspread
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 # ==============================================================================
-# ⚙️ 【主程序置顶配置区】(所有可能调整的参数集中在此处，下方逻辑无需改动)
+# ⚙️ 【主程序置顶配置区】
 # ==============================================================================
-RULES_TAB_NAME    = "映射规则"          # Google 表格中存放样式/全局配置的 Tab 标签页名称
-SCRIPT_TAB_NAME   = "剧本脚本"          # Google 表格中存放台词/分镜脚本的 Tab 标签页名称
+RULES_TAB_NAME    = "config"          # Google 表格中存放样式/全局配置的 Tab 标签页名称
+SCRIPT_TAB_NAME   = "script"          # Google 表格中存放台词/分镜脚本的 Tab 标签页名称
 DEFAULT_FONT_PATH = "materials/font.ttf" # 默认字体保存/读取路径
 OUTPUT_VIDEO_NAME = "final_output.mp4"   # 导出的成品视频文件名
 
 # 从 GitHub Actions 环境变量中安全读取由 Streamlit 传入的数据
-SHEET_URL       = os.getenv("SHEET_URL", "")
+SHEET_URL       = os.getenv("https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit?gid=1021784972#gid=1021784972", "")
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
+GCP_SA_KEY      = os.getenv("GCP_SA_KEY", "") # 👈 新增：读取我们刚配置好的 Google 密钥
 
 TEMP_DIR = "temp_workspace"
 
 
 # ==============================================================================
-# 🛠️ 1. Google 表格多 Tab 数据解析器
+# 🔐 1. Google API 鉴权服务中心 (支持私密表格与私密云端硬盘)
 # ==============================================================================
 
+def get_google_credentials():
+    """解析服务账号 JSON 密钥，获取访问权限"""
+    if not GCP_SA_KEY:
+        raise ValueError("❌ 未找到 GCP_SA_KEY 环境变量！请检查 GitHub Secrets 配置。")
+    
+    info = json.loads(GCP_SA_KEY)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly"
+    ]
+    return Credentials.from_service_account_info(info, scopes=scopes)
+
 def get_google_sheet_tab_csv(sheet_url, tab_name):
-    """提取 Google 表格特定 Tab 名称的 CSV 数据"""
-    match = re.search(r"/d/([a-zA-Z0-9-_]+)", sheet_url)
-    if not match:
-        raise ValueError("❌ 提供 Google 表格链接格式不正确！")
+    """【已升级为私密 API 版】提取 Google 表格特定 Tab 名称的 CSV 数据"""
+    creds = get_google_credentials()
+    gc = gspread.authorize(creds)
     
-    sheet_id = match.group(1)
-    # 通过 Tab 名称抓取导出 CSV
-    encoded_tab = urllib.parse.quote(tab_name)
-    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={encoded_tab}"
+    sh = gc.open_by_url(sheet_url)
+    worksheet = sh.worksheet(tab_name)
+    records = worksheet.get_all_values()
     
-    res = requests.get(export_url, headers={"User-Agent": "Mozilla/5.0"})
-    res.encoding = 'utf-8'
-    if res.status_code != 200:
-        raise RuntimeError(f"❌ 无法读取表格的 [{tab_name}] Tab，请检查 Tab 名称是否正确或权限是否公开！")
-    return res.text
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(records)
+    return output.getvalue()
+
+def download_file_from_gdrive(file_id_or_url, output_path):
+    """【新增】通过 API 从私密 Google Drive 静默下载超大视频/素材"""
+    match = re.search(r"(?:/d/|id=)([a-zA-Z0-9-_]+)", file_id_or_url)
+    file_id = match.group(1) if match else file_id_or_url
+
+    creds = get_google_credentials()
+    drive_service = build('drive', 'v3', credentials=creds)
+
+    request = drive_service.files().get_media(fileId=file_id)
+    fh = io.FileIO(output_path, 'wb')
+    downloader = MediaIoBaseDownload(fh, request)
+    
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return output_path
+
+
+# ==============================================================================
+# 🛠️ 2. Google 表格数据解析器 (保留了你的原始字段逻辑)
+# ==============================================================================
 
 def parse_rules_tab(csv_text):
-    """解析【映射规则】Tab：提取全局配置与各个样式的配置字典"""
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
     if not rows: return {}, {}
@@ -55,7 +90,6 @@ def parse_rules_tab(csv_text):
     return global_cfg, styles_cfg
 
 def parse_script_tab(csv_text):
-    """解析【剧本脚本】Tab：按行提取台词、控制标签与参数"""
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
     if not rows: return []
@@ -67,12 +101,11 @@ def parse_script_tab(csv_text):
         if not row: continue
         row_dict = {header[i]: row[i].strip() for i in range(len(header)) if i < len(row)}
         
-        # 自动跳过带 # 开头的注释行
         text = row_dict.get("台词文本", "").strip()
         if not text or text.startswith("#"): continue
         
         clips.append({
-            "type": row_dict.get("类型", "speech").strip(), # speech (口播) 或 card (卡片)
+            "type": row_dict.get("类型", "speech").strip(),
             "style_tag": row_dict.get("样式标签", "默认正文").strip(),
             "gender": row_dict.get("发音性别", "female").strip(),
             "text": text,
@@ -85,14 +118,11 @@ def parse_script_tab(csv_text):
 
 
 # ==============================================================================
-# 🔍 2. 素材检索与精准匹配 (零硬编码，纯规则驱动)
+# 🔍 3. 素材检索与精准匹配
 # ==============================================================================
 
 def search_pixabay_online_bg(keyword):
-    """调用 Pixabay API 搜索高清视频素材 (视频优先)"""
     if not PIXABAY_API_KEY or not keyword: return ""
-    
-    # 自动将中文关键词翻译为英文（提高匹配率）
     try:
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q={urllib.parse.quote(keyword)}"
         res = requests.get(url, timeout=3).json()
@@ -100,7 +130,6 @@ def search_pixabay_online_bg(keyword):
     except Exception:
         en_kw = keyword
 
-    # 优先检索横屏视频
     try:
         v_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={urllib.parse.quote(en_kw)}&orientation=horizontal&per_page=3"
         res_v = requests.get(v_url, timeout=4).json()
@@ -115,14 +144,19 @@ def search_pixabay_online_bg(keyword):
                         for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
                 return dl_path
     except Exception: pass
-
     return ""
 
 def get_clip_background(clip_data, global_default_bg):
-    """背景选择规则：剧本指定文件 > 剧本关键词 > 本地图库匹配 > 全局表格兜底"""
-    # 1. 剧本直接指定文件名
-    if clip_data["bg_asset"] and os.path.exists(f"materials/{clip_data['bg_asset']}"):
-        return f"materials/{clip_data['bg_asset']}"
+    # 1. 剧本指定文件 (已升级：自动识别 Google Drive 链接/ID)
+    bg_asset = clip_data["bg_asset"]
+    if bg_asset:
+        if "drive.google.com" in bg_asset or len(bg_asset) == 33: # 识别 Google Drive
+            dl_path = f"{TEMP_DIR}/gdrive_bg_{hash(bg_asset)}.mp4"
+            if not os.path.exists(dl_path):
+                download_file_from_gdrive(bg_asset, dl_path)
+            return dl_path
+        elif os.path.exists(f"materials/{bg_asset}"): # 识别本地库
+            return f"materials/{bg_asset}"
         
     # 2. 剧本显式给出了搜索关键词
     if clip_data["keyword"]:
@@ -145,11 +179,10 @@ def get_clip_background(clip_data, global_default_bg):
 
 
 # ==============================================================================
-# 🎬 3. FFmpeg 音视频剪辑合成引擎
+# 🎬 4. FFmpeg 音视频剪辑合成引擎
 # ==============================================================================
 
 async def generate_audio(text, voice_code, speed_val, output_path):
-    """使用 edge-tts 生成高拟真配音"""
     try:
         val = float(str(speed_val).strip())
         pct = round((val - 1.0) * 100)
@@ -159,7 +192,6 @@ async def generate_audio(text, voice_code, speed_val, output_path):
     await edge_tts.Communicate(text, voice_code, rate=rate_str).save(output_path)
 
 def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
-    """单个镜头的音画同步剪辑 (关键：-stream_loop 无缝循环，防黑屏)"""
     width, height = 1920, 1080
     fps = global_cfg.get("视频帧率", "30") or "30"
     
@@ -168,30 +200,26 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     bg_color = style_cfg.get("兜底底色", "black")
     duration = style_cfg.get("停留秒数", "3.0")
 
-    # 字幕遮罩文件
     sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}.txt")
     with open(sub_file, "w", encoding="utf-8") as f: f.write(clip["text"])
 
     cmd = ["ffmpeg", "-y"]
     
-    # 获取背景素材
     bg_path = get_clip_background(clip, global_cfg.get("默认素材/图库路径", "materials/bg_lib/"))
     
     if bg_path and os.path.exists(bg_path):
         if bg_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
-            cmd.extend(["-stream_loop", "-1", "-i", bg_path]) # 视频无限循环，防黑屏
+            cmd.extend(["-stream_loop", "-1", "-i", bg_path]) 
         else:
-            cmd.extend(["-loop", "1", "-i", bg_path])        # 图片持续定格
+            cmd.extend(["-loop", "1", "-i", bg_path])        
     else:
         cmd.extend(["-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}"])
 
-    # 语音输入
     if audio_file:
         cmd.extend(["-i", audio_file])
     else:
         cmd.extend(["-f", "lavfi", "-i", f"anullsrc=cl=stereo:r=44100:d={duration}"])
 
-    # 滤镜链：拉伸裁剪铺满 + 叠加文字
     filter_chain = (
         f"[0:v]setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}[bg];"
         f"[bg]drawtext=fontfile='{font_path}':textfile='{sub_file}':fontcolor={font_color}:fontsize={font_size}:x=(W-w)/2:y=H-text_h-100[outv]"
@@ -201,7 +229,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         "-filter_complex", filter_chain,
         "-map", "[outv]", "-map", "1:a",
         "-r", str(fps), "-c:v", "libx264", "-c:a", "aac",
-        "-shortest", # 以音频长度为基准，精确切断
+        "-shortest", 
         output_path
     ])
     
@@ -212,13 +240,13 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
 
 
 # ==============================================================================
-# 🚀 4. 主程序入口
+# 🚀 5. 主程序入口
 # ==============================================================================
 
 async def main():
     os.makedirs(TEMP_DIR, exist_ok=True)
     
-    print("▶ [1/4] 从 Google 表格读取多 Tab 配置与剧本...")
+    print("▶ [1/4] 🔐 正在通过 Google API 安全读取私密表格...")
     rules_csv = get_google_sheet_tab_csv(SHEET_URL, RULES_TAB_NAME)
     script_csv = get_google_sheet_tab_csv(SHEET_URL, SCRIPT_TAB_NAME)
     
@@ -227,7 +255,7 @@ async def main():
     
     font_path = DEFAULT_FONT_PATH if os.path.exists(DEFAULT_FONT_PATH) else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-    print(f"▶ [2/4] 解析出 {len(clips)} 个分镜镜头，开始逐个合成...")
+    print(f"▶ [2/4] 解析出 {len(clips)} 个分镜镜头，开始自动拉取云端素材并合成...")
     video_segments = []
     
     for idx, clip in enumerate(clips, 1):
