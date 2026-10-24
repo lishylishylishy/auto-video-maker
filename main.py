@@ -364,11 +364,8 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         ]
         subprocess.run(cmd, capture_output=True, check=True)
 
-def generate_ass_subtitle(output_path, text, font_size, color, alignment, margin_h, margin_v, duration, vid_w=1920, vid_h=1080, line_spacing=8):
-    """ 生成标准ASS字幕文件，精准控制字体、位置、换行 """
-    # 处理换行
-    lines = text.split("\n")
-    # ASS颜色格式转换
+def generate_ass_subtitle(output_path, text_or_segments, font_size, color, alignment, margin_h, margin_v, duration, vid_w=1920, vid_h=1080, line_spacing=8):
+    """ 生成标准ASS字幕文件，支持全程显示(标题)或按时间轴分段显示(长字幕) """
     ass_color = color
     if not color.startswith("&H"):
         ass_color = "&H00FFFFFF" if color == "white" else "&H00000000"
@@ -386,10 +383,28 @@ Style: Default,CustomFont,{font_size},{ass_color},&H000000FF,&H00000000,&H000000
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    # 字幕全程显示
-    dialog_text = "\\N".join(lines)
-    ass_content += f"Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{dialog_text}\n"
-    
+    def format_ass_time(seconds):
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        return f"{h}:{m:02d}:{s:05.2f}"
+
+    if isinstance(text_or_segments, str):
+        # 针对无声大字：全程显示
+        dialog_text = text_or_segments.replace('\n', '\\N')
+        ass_content += f"Dialogue: 0,{format_ass_time(0)},{format_ass_time(duration)},Default,,0,0,0,,{dialog_text}\n"
+    else:
+        # 针对有声字幕：按字数比例分配时间轴，先后显示
+        total_chars = sum(seg["char_count"] for seg in text_or_segments) or 1
+        current_time = 0.0
+        for seg in text_or_segments:
+            seg_duration = (seg["char_count"] / total_chars) * duration
+            start_time = format_ass_time(current_time)
+            end_time = format_ass_time(current_time + seg_duration)
+            dialog_text = seg["text"].replace('\n', '\\N')
+            ass_content += f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{dialog_text}\n"
+            current_time += seg_duration
+            
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(ass_content)
     return output_path
@@ -511,18 +526,30 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
         curr_v = "[v_with_title]"
 
     # 有声字幕（严格仅用全局配置）
+# 有声字幕（严格仅用全局配置）
     if spoken_text:
-        cn_sub = wrap_text_by_punctuation(spoken_text, max_len=20)
+        # 1. 先将长句切分为短句（中文每行最大20字，避免出画）
+        cn_lines = wrap_text_by_punctuation(spoken_text, max_len=20).split('\n')
         is_bilingual = (get_param(["双语字幕"], global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
-        if is_bilingual:
-            en_raw = translate_to_english(spoken_text)
-            if en_raw:
-                en_sub = wrap_text_by_punctuation(en_raw, max_len=40)
-                sub_text = f"{cn_sub}\n{en_sub}"
+        
+        sub_segments = []
+        for cn_line in cn_lines:
+            if not cn_line.strip():
+                continue
+            if is_bilingual:
+                # 2. 对切分好的中文短句单独进行英文翻译
+                en_line = translate_to_english(cn_line)
+                # 英文较长，限制长度40，若超过自动通过 \N 折行避免出画
+                en_sub = wrap_text_by_punctuation(en_line, max_len=40).replace('\n', '\\N')
+                # 中文在上，英文在下
+                sub_text = f"{cn_line}\\N{en_sub}"
             else:
-                sub_text = cn_sub
-        else:
-            sub_text = cn_sub
+                sub_text = cn_line
+                
+            sub_segments.append({
+                "text": sub_text, 
+                "char_count": len(cn_line)
+            })
         
         sub_size = get_param(["文字-字号"], global_cfg, default="30")
         sub_color = sanitize_color(get_param(["文字-颜色"], global_cfg, default="white"))
@@ -530,7 +557,8 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
         align, mh, mv = calc_ass_position(sub_pos_str, is_subtitle=True)
         
         sub_ass_path = os.path.abspath(f"{TEMP_DIR}/sub_{index}.ass")
-        generate_ass_subtitle(sub_ass_path, sub_text, int(sub_size), sub_color, align, mh, mv, clip_duration, vid_w, vid_h)
+        # 传入 sub_segments 数组，由 generate_ass_subtitle 自动计算分段排期
+        generate_ass_subtitle(sub_ass_path, sub_segments, int(sub_size), sub_color, align, mh, mv, clip_duration, vid_w, vid_h)
         
         filter_chains.append(f"{curr_v}ass={sub_ass_path}[outv]")
     else:
