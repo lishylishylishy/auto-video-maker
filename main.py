@@ -10,10 +10,8 @@ from googleapiclient.http import MediaIoBaseDownload
 RULES_TAB_NAME  = "config"         # 🌟 [*] config 页签
 SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script") # 🌟 [*] script 页签
 SHEET_URL       = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
-
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "") 
 GCP_SA_KEY      = os.getenv("GCP_SA_KEY", "")      
-
 TEMP_DIR          = "temp_workspace"
 OUTPUT_VIDEO_NAME = "final_output.mp4"
 
@@ -59,7 +57,7 @@ def download_file_from_gdrive(file_id_or_url, output_path):
     return output_path
 
 def get_audio_duration(file_path):
-    """ 🌟 [*] 精准测量 TTS 标准化 MP3 音频时长 """
+    """ 🌟 [*] 精准测量 TTS 标准化 MP3 音频时长，失败返回None，不做兜底截断 """
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -71,7 +69,7 @@ def get_audio_duration(file_path):
             return val
     except Exception as e:
         print(f"无法检测音频时长 ({file_path}): {e}", flush=True)
-    return 3.0
+    return None
 
 def is_video_media(filepath):
     """ 🌟 [*] 判断素材是动态视频还是静态图片 """
@@ -99,18 +97,14 @@ def is_video_media(filepath):
 def wrap_text_by_punctuation(text, max_len=18):
     if not text or len(text) <= max_len:
         return text or ""
-
     pattern = r'([，。！？；：, \.\!\?\;\:])'
     tokens = re.split(pattern, text)
-
     lines = []
     current_line = ""
-
     for i in range(0, len(tokens), 2):
         chunk = tokens[i]
         punct = tokens[i+1] if i + 1 < len(tokens) else ""
         part = chunk + punct
-
         if len(current_line) + len(part) <= max_len:
             current_line += part
         else:
@@ -125,10 +119,8 @@ def wrap_text_by_punctuation(text, max_len=18):
                         current_line = sub
             else:
                 current_line = part
-
     if current_line:
         lines.append(current_line.strip())
-
     return "\n".join(lines)
 
 def translate_to_english(text):
@@ -169,12 +161,10 @@ def calculate_position_expr(pos_str, is_subtitle=False):
     pos = str(pos_str).strip()
     if not pos:
         return "x=(W-w)/2:y=H-h-80" if is_subtitle else "x=(W-w)/2:y=(H-h)/2"
-
     if "绝对坐标" in pos:
         match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
         if match:
             return f"x={match.group(1)}:y={match.group(2)}"
-
     if "居中偏" in pos or "居中偏移" in pos:
         match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
         if match:
@@ -182,7 +172,6 @@ def calculate_position_expr(pos_str, is_subtitle=False):
             ox_str = f"+{ox:g}" if ox > 0 else (f"{ox:g}" if ox < 0 else "")
             oy_str = f"+{oy:g}" if oy > 0 else (f"{oy:g}" if oy < 0 else "")
             return f"x=(W-w)/2{ox_str}:y=(H-h)/2{oy_str}"
-
     if "底部偏" in pos or "底部偏移" in pos:
         match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
         if match:
@@ -190,7 +179,6 @@ def calculate_position_expr(pos_str, is_subtitle=False):
             ox_str = f"+{ox:g}" if ox > 0 else (f"{ox:g}" if ox < 0 else "")
             oy_str = f"+{oy:g}" if oy > 0 else (f"{oy:g}" if oy < 0 else "")
             return f"x=(W-w)/2{ox_str}:y=H-h-80{oy_str}"
-
     if pos in ["居中", "居中居中"]: return "x=(W-w)/2:y=(H-h)/2"
     if "底部" in pos: return "x=(W-w)/2:y=H-h-80"
     if pos == "顶部": return "x=(W-w)/2:y=60"
@@ -198,7 +186,6 @@ def calculate_position_expr(pos_str, is_subtitle=False):
     if pos == "右上角": return "x=W-w-40:y=40"
     if pos == "左下角": return "x=40:y=H-h-120"
     if pos == "右下角": return "x=W-w-40:y=H-h-120"
-
     return "x=(W-w)/2:y=H-h-80" if is_subtitle else "x=(W-w)/2:y=(H-h)/2"
 
 # ==============================================================================
@@ -269,7 +256,6 @@ def parse_script_tab(csv_text):
             duration = float(duration_str) if duration_str else None
         except ValueError:
             duration = None
-
         clip_data = row_dict.copy()
         clip_data.update({
             "bg_layer0": bg_layer0,
@@ -337,21 +323,18 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         raw_tts_path = audio_output_path + ".raw.mp3"
         await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(raw_tts_path)
         
-        # 🌟 [*] 强制标准化转码为 44100Hz 双声道 MP3，彻底解决采样率不一致引起的切音/音画脱节问题
+        # 🌟 [*] 强制标准化转码：统一编码器为libmp3lame，彻底解决采样率不一致引起的切音/音画脱节问题
         std_cmd = [
             "ffmpeg", "-y", "-i", raw_tts_path,
-            "-ar", "44100", "-ac", "2", "-b:a", "192k",
+            "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2", "-b:a", "192k",
             audio_output_path
         ]
         subprocess.run(std_cmd, capture_output=True, check=True)
         if os.path.exists(raw_tts_path):
             os.remove(raw_tts_path)
     else:
-        dur = clip["duration"] if clip["duration"] else None
-        if not dur:
-            dur_str = get_param(["章节秒数", "停留秒数"], clip, style_cfg, global_cfg, default="3.0")
-            try: dur = float(dur_str)
-            except ValueError: dur = 3.0
+        # 🌟 [*] 无声片段：严格使用script表填写的章节秒数，不读取config配置
+        dur = clip["duration"] if clip["duration"] else 3.0
             
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
@@ -365,19 +348,19 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     spoken_text = clip["spoken_text"].strip()
     silent_text = clip["silent_text"].strip()
     
-    # 🌟 [*] 时长判定：有声配音固定取转码后的实际语音时长 + 0.4s 余量；无声卡片依次读取 script 秒数 -> config 秒数
+    # 🌟 [*] 时长核心逻辑：有声以配音为准，检测失败不强制截断；无声严格按script秒数
+    use_time_limit = False
+    clip_duration = 3.0
     if spoken_text:
-        clip_duration = get_audio_duration(audio_file) + 0.4
+        audio_dur = get_audio_duration(audio_file)
+        if audio_dur:
+            clip_duration = audio_dur + 0.4
+            use_time_limit = True
     else:
-        if clip["duration"]:
-            clip_duration = clip["duration"]
-        else:
-            dur_str = get_param(["章节秒数", "停留秒数"], clip, style_cfg, global_cfg, default="3.0")
-            try: clip_duration = float(dur_str)
-            except ValueError: clip_duration = 3.0
+        clip_duration = clip["duration"] if clip["duration"] else 3.0
+        use_time_limit = True
 
     font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
-
     cmd = ["ffmpeg", "-y"]
     
     # 图层素材查找：script 行 -> config 章节控制行 -> config 全局配置行
@@ -405,16 +388,26 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
             cmd.extend(["-stream_loop", "-1", "-i", path_l1])
         else:
             cmd.extend(["-loop", "1", "-i", path_l1])
-
     cmd.extend(["-i", audio_file])
     
-    raw_bgm = get_param(["BGM垫音", "BGM路径"], clip, style_cfg, global_cfg, default="")
+    # 🌟 [*] BGM 分级循环逻辑：全局BGM循环，章节/单行BGM仅播放一遍
+    bgm_level = "none"
+    raw_bgm = get_param(["BGM垫音", "BGM路径"], clip, style_cfg, default="")
+    if raw_bgm:
+        bgm_level = "chapter"
+    else:
+        raw_bgm = get_param(["BGM垫音", "BGM路径"], global_cfg, default="")
+        if raw_bgm:
+            bgm_level = "global"
+    
     path_bgm = resolve_asset_path(raw_bgm)
     has_bgm = bool(path_bgm and os.path.exists(path_bgm))
     if has_bgm:
-        if is_video_media(path_bgm):
+        if bgm_level == "global":
+            # 全局BGM：强制循环（音视频均生效）
             cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
         else:
+            # 章节/单行BGM：仅播放一遍
             cmd.extend(["-i", path_bgm])
 
     # 挂件抠图与位置控制：script -> config 章节控制行 -> config 全局配置行
@@ -429,7 +422,6 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
             
         target_overlay_w = int(1920 * scale_ratio)
         pos_expr = calculate_position_expr(overlay_pos_str, is_subtitle=False)
-
         filter_chain = (
             f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg_base];"
             f"[1:v]setpts=PTS-STARTPTS,scale={target_overlay_w}:-1,colorkey={chroma_color}:0.3:0.2[l1];"
@@ -443,12 +435,12 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         )
         audio_in_idx = 1
         bgm_in_idx = 2
-
     curr_v = "[bg_curr]"
 
     # --------------------------------------------------------------------------
     # 🌟 A. 渲染【无声文字】（标题/PPT大字）
-    # 样式优先级：script -> config 章节控制行 (例如片头 150号字/yellow) -> 全局配置
+    # 样式优先级：script -> config 章节控制行 -> 全局配置
+    # 修复：仅通过「字幕位置」控制，不再混入挂件-位置字段
     # --------------------------------------------------------------------------
     if silent_text:
         title_formatted = wrap_text_by_punctuation(silent_text, max_len=14)
@@ -459,15 +451,15 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         
         title_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="150")
         title_color = sanitize_color(get_param(["文字-颜色"], clip, style_cfg, global_cfg, default="yellow"))
-        title_pos_str = get_param(["字幕位置", "挂件-位置"], clip, style_cfg, global_cfg, default="居中")
+        title_pos_str = get_param(["字幕位置"], clip, style_cfg, global_cfg, default="居中")
         title_pos_expr = calculate_position_expr(title_pos_str, is_subtitle=False)
         
-        filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{title_clean}':fontcolor={title_color}:fontsize={title_size}:line_spacing=15:{title_pos_expr}[v_title];"
+        filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{title_clean}':fontcolor={title_color}:fontsize={title_size}:line_spacing=15:fontindex=0:{title_pos_expr}[v_title];"
         curr_v = "[v_title]"
 
     # --------------------------------------------------------------------------
     # 🌟 B. 渲染【有声文字】（口播配音字幕）
-    # 样式优先级：只读取 script -> 全局配置 (30号字/white/底部居中)，跳过 style_cfg 章节控制！
+    # 样式优先级：严格仅读取全局配置，章节/单行配置不覆盖
     # --------------------------------------------------------------------------
     if spoken_text:
         cn_sub = wrap_text_by_punctuation(spoken_text, max_len=20)
@@ -485,26 +477,25 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
             f.write(sub_text_content)
         sub_clean = sub_file.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
         
-        # 🌟 [*] 核心修改：不传入 style_cfg，确保配音字幕的样式（字号、颜色、位置）只听全局配置！
-        sub_size = get_param(["文字-字号"], clip, global_cfg, default="30")
-        sub_color = sanitize_color(get_param(["文字-颜色"], clip, global_cfg, default="white"))
-        sub_pos_str = get_param(["字幕位置"], clip, global_cfg, default="底部居中")
+        # 🌟 [*] 核心修复：仅读取全局配置，确保配音字幕样式完全由全局控制
+        sub_size = get_param(["文字-字号"], global_cfg, default="30")
+        sub_color = sanitize_color(get_param(["文字-颜色"], global_cfg, default="white"))
+        sub_pos_str = get_param(["字幕位置"], global_cfg, default="底部居中")
         sub_pos_expr = calculate_position_expr(sub_pos_str, is_subtitle=True)
         
-        filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{sub_clean}':fontcolor={sub_color}:fontsize={sub_size}:line_spacing=8:{sub_pos_expr}[outv];"
+        filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{sub_clean}':fontcolor={sub_color}:fontsize={sub_size}:line_spacing=8:fontindex=0:{sub_pos_expr}[outv];"
     else:
         filter_chain += f"{curr_v}null[outv];"
 
-    # 🌟 [*] 声音混合：强制进行 44100Hz 2ch 格式化，防止音画脱节与断音
+    # 🌟 [*] 声音混合：关闭自动归一化，保证配音音量不被压低
     bgm_vol = get_param(["BGM音量"], clip, style_cfg, global_cfg, default="1.0")
     try: vol_val = float(bgm_vol)
     except ValueError: vol_val = 1.0
-
     if has_bgm:
         filter_chain += (
             f"[{audio_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[a_tts];"
             f"[{bgm_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={vol_val}[a_bgm];"
-            f"[a_tts][a_bgm]amix=inputs=2:duration=first:dropout_transition=2[outa]"
+            f"[a_tts][a_bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[outa]"
         )
     else:
         filter_chain += f"[{audio_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[outa]"
@@ -512,11 +503,13 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     cmd.extend([
         "-filter_complex", filter_chain,
         "-map", "[outv]", "-map", "[outa]",
-        "-t", f"{clip_duration:.2f}",
         "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-ar", "44100", "-ac", "2",
-        output_path
     ])
+    # 仅在确定时长时强制截断，配音时长检测失败则跟随音频自然结束
+    if use_time_limit:
+        cmd.extend(["-t", f"{clip_duration:.2f}"])
+    cmd.append(output_path)
     
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
@@ -539,23 +532,17 @@ async def main():
     if not clips:
         raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
     
-    # 🌟 [*] 从全局配置中读取字体链接并下载
+    # 🌟 [*] 强制使用 Google Drive 自定义字体，无任何系统兜底，加载失败直接终止
     drive_font_url = get_param(["字体"], global_cfg, default="")
+    if not drive_font_url:
+        raise ValueError("config表全局配置中未找到「字体」字段，请填写字体的Google Drive链接")
+    
     font_path = f"{TEMP_DIR}/custom_font.ttf"
-    if drive_font_url and not os.path.exists(font_path):
-        print("正在下载 Google Drive 自定义字体...", flush=True)
-        try:
-            download_file_from_gdrive(drive_font_url, font_path)
-        except Exception as e:
-            print(f"下载自定义字体失败，将使用系统默认字体: {e}", flush=True)
-            
+    print("正在下载 Google Drive 自定义字体...", flush=True)
+    download_file_from_gdrive(drive_font_url, font_path)
+    
     if not os.path.exists(font_path) or os.path.getsize(font_path) < 1000:
-        # 系统默认中文字体兜底
-        cjk_fallback = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-        if os.path.exists(cjk_fallback):
-            font_path = cjk_fallback
-        else:
-            font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        raise RuntimeError("字体文件下载失败或无效，请检查字体链接的分享权限是否设置为「任何人可查看」")
 
     video_segments = []
     
@@ -578,10 +565,8 @@ async def main():
                 clean_path = os.path.abspath(seg).replace("'", "'\\''")
                 f.write(f"file '{clean_path}'\n")
                 valid_segments.append(seg)
-
     if not valid_segments:
         raise RuntimeError("没有生成任何有效的视频片段！")
-
     concat_cmd = [
         "ffmpeg", "-y",
         "-f", "concat",
