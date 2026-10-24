@@ -46,7 +46,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Helper: 请求 GitHub API 触发渲染
-def trigger_github_workflow(tab_name):
+def trigger_github_workflow(tab_name, resolution):
     token = get_secret("GITHUB_TOKEN", "")
     repo = get_secret("GITHUB_REPOSITORY", get_secret("GITHUB_REPO", ""))
     ref = get_secret("GITHUB_REF", "main")
@@ -59,7 +59,7 @@ def trigger_github_workflow(tab_name):
         "Authorization": f"Bearer {token}"
     }
     url = f"https://api.github.com/repos/{repo}/actions/workflows/render.yml/dispatches"
-    payload = {"ref": ref, "inputs": {"sheet_tab": tab_name}}
+    payload = {"ref": ref, "inputs": {"sheet_tab": tab_name, "resolution": resolution}}
     
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
@@ -148,9 +148,13 @@ with st.sidebar:
     st.markdown("---")
     
     target_tab = st.text_input("Target Sheet Tab", value="script", help="输入 Google Sheet 底部的 Tab 名称")
-    
+    video_resolution = st.text_input(
+        "视频分辨率",
+        value="1920x1080",
+        help="格式：宽x高，例如 1920x1080、1280x720"
+    )
     if st.button("🚀 Start Rendering", type="primary", use_container_width=True):
-        ok, msg = trigger_github_workflow(target_tab)
+        ok, msg = trigger_github_workflow(target_tab, video_resolution)
         if ok:
             st.cache_data.clear()  # 清理旧视频缓存
             st.success("✅ 云端渲染任务已启动！您可以随时关闭浏览器，后台会自动运行。")
