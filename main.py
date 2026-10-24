@@ -7,20 +7,21 @@ from googleapiclient.http import MediaIoBaseDownload
 # ==============================================================================
 # ⚙️ 【主程序置顶配置区】
 # ==============================================================================
-RULES_TAB_NAME  = "config"         # 🌟 [*] 读取 config 页签（包含 全局配置、全局字幕、章节样式）
-SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script") # 🌟 [*] 读取 script 剧本页签
+RULES_TAB_NAME  = "config"         # 🌟 [*] config 控制页签
+SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script") # 🌟 [*] script 脚本页签
 SHEET_URL       = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 
-PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "") # 🌟 [*] 在线素材 Key
-GCP_SA_KEY      = os.getenv("GCP_SA_KEY", "")      # 🌟 [*] Google 鉴权 Key
+PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "") 
+GCP_SA_KEY      = os.getenv("GCP_SA_KEY", "")      
 
-TEMP_DIR          = "temp_workspace" # 🌟 [*] 渲染临时文件夹
-OUTPUT_VIDEO_NAME = "final_output.mp4" # 🌟 [*] 导出的文件名
+TEMP_DIR          = "temp_workspace"
+OUTPUT_VIDEO_NAME = "final_output.mp4"
 
+# 🌟 [*] 与 config 表格 A 列严格一致的 5 个章节名称
 VALID_CHAPTERS = {"片头", "转场", "结尾", "男配音", "女配音"}
 
 # ==============================================================================
-# 🔐 1. Google API 鉴权与下载中心 
+# 🔐 1. Google API 鉴权与下载中心
 # ==============================================================================
 def get_google_credentials():
     if not GCP_SA_KEY:
@@ -58,7 +59,7 @@ def download_file_from_gdrive(file_id_or_url, output_path):
     return output_path
 
 def get_audio_duration(file_path):
-    """ 🌟 [*] 精准测量生成好的 TTS 配音 mp3 文件时长（秒） """
+    """ 🌟 [*] 精准测量 TTS 生成的 MP3 时长，绝对防止提前断音 """
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -73,7 +74,7 @@ def get_audio_duration(file_path):
     return 3.0
 
 def is_video_media(filepath):
-    """ 🌟 [*] 判断素材是视频还是静态图片（决定使用 -stream_loop 还是 -loop） """
+    """ 🌟 [*] 判断素材是视频还是静态图片 """
     try:
         cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -143,9 +144,9 @@ def translate_to_english(text):
         return ""
 
 def sanitize_color(color_str):
-    """ 🌟 [*] 颜色清洗工具：防止表格里的 grey 导致 FFmpeg 崩溃 """
+    """ 🌟 [*] 修复 grey 字母拼写与 RGB 色值转换 """
     if not color_str or not str(color_str).strip():
-        return "black"
+        return "white"
     c = str(color_str).strip()
     if c.lower() == "grey":
         return "gray"
@@ -165,56 +166,51 @@ def parse_rgb_to_ffmpeg(rgb_str):
     return "0x0000FF"
 
 def calculate_position_expr(pos_str, is_subtitle=False):
-    """ 🌟 [*] 位置坐标解析器：把“居中偏移:350,-700”转换为 FFmpeg 坐标 """
+    """ 🌟 [*] 全能坐标解析器（支持 居中、底部居中、居中偏移:X,Y、绝对坐标:X,Y） """
     pos = str(pos_str).strip()
-    
-    if "绝对坐标" in pos:
-        raw_coords = pos.replace("绝对坐标:", "").replace("绝对坐标", "").strip()
-        parts = [p.strip() for p in raw_coords.split(",") if p.strip()]
-        if len(parts) >= 2:
-            return f"x={parts[0]}:y={parts[1]}"
-            
-    elif "居中偏移" in pos:
-        raw_offsets = pos.replace("居中偏移:", "").replace("居中偏移", "").strip()
-        parts = [p.strip() for p in raw_offsets.split(",") if p.strip()]
-        if len(parts) >= 2:
-            try:
-                ox = float(parts[0])
-                oy = float(parts[1])
-                ox_str = f"+{ox:g}" if ox > 0 else (f"{ox:g}" if ox < 0 else "")
-                oy_str = f"+{oy:g}" if oy > 0 else (f"{oy:g}" if oy < 0 else "")
-                return f"x=(W-w)/2{ox_str}:y=(H-h)/2{oy_str}"
-            except ValueError: pass
-            
-    elif "底部偏移" in pos:
-        raw_offsets = pos.replace("底部偏移:", "").replace("底部偏移", "").strip()
-        parts = [p.strip() for p in raw_offsets.split(",") if p.strip()]
-        if len(parts) >= 2:
-            try:
-                ox = float(parts[0])
-                oy = float(parts[1])
-                ox_str = f"+{ox:g}" if ox > 0 else (f"{ox:g}" if ox < 0 else "")
-                oy_str = f"+{oy:g}" if oy > 0 else (f"{oy:g}" if oy < 0 else "")
-                return f"x=(W-w)/2{ox_str}:y=H-h-80{oy_str}"
-            except ValueError: pass
+    if not pos:
+        return "x=(W-w)/2:y=H-h-80" if is_subtitle else "x=(W-w)/2:y=(H-h)/2"
 
+    if "绝对坐标" in pos:
+        match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
+        if match:
+            return f"x={match.group(1)}:y={match.group(2)}"
+
+    if "居中偏" in pos or "居中偏移" in pos:
+        match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
+        if match:
+            ox, oy = float(match.group(1)), float(match.group(2))
+            ox_str = f"+{ox:g}" if ox > 0 else (f"{ox:g}" if ox < 0 else "")
+            oy_str = f"+{oy:g}" if oy > 0 else (f"{oy:g}" if oy < 0 else "")
+            return f"x=(W-w)/2{ox_str}:y=(H-h)/2{oy_str}"
+
+    if "底部偏" in pos or "底部偏移" in pos:
+        match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
+        if match:
+            ox, oy = float(match.group(1)), float(match.group(2))
+            ox_str = f"+{ox:g}" if ox > 0 else (f"{ox:g}" if ox < 0 else "")
+            oy_str = f"+{oy:g}" if oy > 0 else (f"{oy:g}" if oy < 0 else "")
+            return f"x=(W-w)/2{ox_str}:y=H-h-80{oy_str}"
+
+    if pos in ["居中", "居中居中"]: return "x=(W-w)/2:y=(H-h)/2"
+    if "底部" in pos: return "x=(W-w)/2:y=H-h-80"
+    if pos == "顶部": return "x=(W-w)/2:y=60"
     if pos == "左上角": return "x=40:y=40"
-    elif pos == "右上角": return "x=W-w-40:y=40"
-    elif pos == "左下角": return "x=40:y=H-h-120"
-    elif pos == "右下角": return "x=W-w-40:y=H-h-120"
-    elif pos == "居中": return "x=(W-w)/2:y=(H-h)/2"
-    elif pos == "顶部": return "x=(W-w)/2:y=60"
-    elif pos == "底部": return "x=(W-w)/2:y=H-h-80"
-    
-    if is_subtitle:
-        return "x=(W-w)/2:y=H-h-100"
-    return "x=(W-w)/2:y=(H-h)/2"
+    if pos == "右上角": return "x=W-w-40:y=40"
+    if pos == "左下角": return "x=40:y=H-h-120"
+    if pos == "右下角": return "x=W-w-40:y=H-h-120"
+
+    return "x=(W-w)/2:y=H-h-80" if is_subtitle else "x=(W-w)/2:y=(H-h)/2"
 
 # ==============================================================================
-# 🛠️ 3. 解析与级联继承算法
+# 🛠️ 3. 解析与 3 层级联继承算法 (彻底杜绝硬编码覆盖)
 # ==============================================================================
 def get_param(keys, *dict_layers, default=""):
-    """ 🌟 [*] 级联查找器 """
+    """
+    🌟 [*] 核心级联函数：传入 (*dict_layers) 优先级队列
+    顺序：script 当前行 -> config 章节控制行 -> config 全局配置行
+    只要在某个层级找到有有效值，立即使用，绝不遮蔽！
+    """
     if isinstance(keys, str):
         keys = [keys]
         
@@ -227,12 +223,12 @@ def get_param(keys, *dict_layers, default=""):
     return default
 
 def parse_rules_tab(csv_text):
-    """ 🌟 [*] 读取 config 表格 """
+    """ 🌟 [*] 读取 config 页签：精准区分 全局配置 行 与 章节控制 行 """
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
-    if not rows: return {}, {}, {}
+    if not rows: return {}, {}
     header = [c.strip() for c in rows[0]]
-    global_cfg, sub_cfg, styles_cfg = {}, {}, {}
+    global_cfg, styles_cfg = {}, {}
     for row in rows[1:]:
         if not row or not row[0].strip(): continue
         obj_name = row[0].strip()
@@ -242,15 +238,13 @@ def parse_rules_tab(csv_text):
         
         if obj_name == "全局配置":
             global_cfg = row_dict
-        elif obj_name == "全局字幕":
-            sub_cfg = row_dict
         else:
             styles_cfg[obj_name] = row_dict
             
-    return global_cfg, sub_cfg, styles_cfg
+    return global_cfg, styles_cfg
 
 def parse_script_tab(csv_text):
-    """ 🌟 [*] 读取 script 表格 """
+    """ 🌟 [*] 读取 script 页签 """
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
     if not rows: return []
@@ -332,8 +326,9 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
     spoken_text = clip["spoken_text"].strip()
     
     if spoken_text:
-        voice = get_param(["配音-音色代号", "男声代码", "女声代码"], clip, style_cfg, global_cfg, default="zh-CN-XiaoxiaoNeural")
-        rate_raw = get_param(["配音-语速", "男声语速", "女声语速"], clip, style_cfg, global_cfg, default="1.0")
+        # 🌟 [*] 音色与语速读取：script -> config 章节行 -> config 全局配置行
+        voice = get_param(["配音-音色代号"], clip, style_cfg, global_cfg, default="zh-CN-XiaoxiaoNeural")
+        rate_raw = get_param(["配音-语速"], clip, style_cfg, global_cfg, default="1.0")
         
         try:
             rate_val = float(rate_raw)
@@ -344,6 +339,7 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
             
         await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(audio_output_path)
     else:
+        # 🌟 [*] 秒数读取：script 章节秒数 -> config 停留秒数 -> 全局配置
         dur = clip["duration"] if clip["duration"] else None
         if not dur:
             dur_str = get_param(["章节秒数", "停留秒数"], clip, style_cfg, global_cfg, default="3.0")
@@ -356,12 +352,13 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         ]
         subprocess.run(cmd, capture_output=True, check=True)
 
-def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_file, output_path):
+def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
     print(f"[Render] 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
     
     spoken_text = clip["spoken_text"].strip()
     silent_text = clip["silent_text"].strip()
     
+    # 🌟 [*] 时长判定核心：有声文字固定取语音实际长度；无声卡片依次级联读取表格秒数
     if spoken_text:
         clip_duration = get_audio_duration(audio_file) + 0.4
     else:
@@ -376,8 +373,9 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
 
     cmd = ["ffmpeg", "-y"]
     
-    raw_l0 = get_param(["默认素材-layer0", "素材-layer0", "背景素材"], clip, style_cfg, global_cfg, default="")
-    raw_l1 = get_param(["挂件-layer1", "挂件素材-layer1", "贴图素材"], clip, style_cfg, global_cfg, default="")
+    # 🌟 [*] 图层素材查找：script 行 -> config 章节行 -> config 全局配置行
+    raw_l0 = get_param(["默认素材-layer0", "素材-layer0"], clip, style_cfg, global_cfg, default="")
+    raw_l1 = get_param(["挂件-layer1", "挂件素材-layer1"], clip, style_cfg, global_cfg, default="")
     
     path_l0 = resolve_asset_path(raw_l0)
     path_l1 = resolve_asset_path(raw_l1)
@@ -412,15 +410,15 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
         else:
             cmd.extend(["-i", path_bgm])
 
-    # 挂件抠图与坐标控制
+    # 🌟 [*] 挂件抠图/缩放/位置控制：script -> config 章节行 -> config 全局配置行
     if has_layer1:
-        chroma_rgb = get_param(["挂件-扣图RGB", "挂件-抠图RGB", "绿幕扣图RGB"], clip, style_cfg, global_cfg, default="0,0,255")
+        chroma_rgb = get_param(["挂件-扣图RGB", "绿幕扣图RGB"], clip, style_cfg, global_cfg, default="0,0,255")
         chroma_color = parse_rgb_to_ffmpeg(chroma_rgb)
         
-        overlay_pos_str = get_param(["挂件-位置", "贴图位置"], clip, style_cfg, global_cfg, default="右下角")
-        scale_str = get_param(["挂件-缩放", "贴图缩放"], clip, style_cfg, global_cfg, default="35%").replace("%", "").strip()
+        overlay_pos_str = get_param(["挂件-位置", "贴图位置"], clip, style_cfg, global_cfg, default="居中")
+        scale_str = get_param(["挂件-缩放", "贴图缩放"], clip, style_cfg, global_cfg, default="50%").replace("%", "").strip()
         try: scale_ratio = float(scale_str) / 100.0
-        except ValueError: scale_ratio = 0.35
+        except ValueError: scale_ratio = 0.50
             
         target_overlay_w = int(1920 * scale_ratio)
         pos_expr = calculate_position_expr(overlay_pos_str, is_subtitle=False)
@@ -443,6 +441,7 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
 
     # --------------------------------------------------------------------------
     # 🌟 A. 渲染【无声文字】（标题/PPT大字）
+    # 样式优先级：script -> config 章节行 (如片头 150号字/yellow) -> 全局配置
     # --------------------------------------------------------------------------
     if silent_text:
         title_formatted = wrap_text_by_punctuation(silent_text, max_len=14)
@@ -451,7 +450,7 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
             f.write(title_formatted)
         title_clean = title_file.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
         
-        title_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="120")
+        title_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="150")
         title_color = sanitize_color(get_param(["文字-颜色"], clip, style_cfg, global_cfg, default="yellow"))
         title_pos_str = get_param(["字幕位置", "挂件-位置"], clip, style_cfg, global_cfg, default="居中")
         title_pos_expr = calculate_position_expr(title_pos_str, is_subtitle=False)
@@ -461,11 +460,12 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
 
     # --------------------------------------------------------------------------
     # 🌟 B. 渲染【有声文字】（口播配音字幕）
+    # 样式优先级：script -> config 章节行 -> config 全局配置 (30号字/white/底部居中)
     # --------------------------------------------------------------------------
     if spoken_text:
         cn_sub = wrap_text_by_punctuation(spoken_text, max_len=20)
         
-        is_bilingual = (get_param(["双语字幕"], clip, style_cfg, sub_cfg, global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
+        is_bilingual = (get_param(["双语字幕"], clip, style_cfg, global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
         if is_bilingual:
             en_raw = translate_to_english(spoken_text)
             en_sub = wrap_text_by_punctuation(en_raw, max_len=40)
@@ -478,9 +478,9 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
             f.write(sub_text_content)
         sub_clean = sub_file.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
         
-        sub_size = get_param(["文字-字号"], clip, style_cfg, sub_cfg, global_cfg, default="30")
-        sub_color = sanitize_color(get_param(["文字-颜色"], clip, style_cfg, sub_cfg, global_cfg, default="white"))
-        sub_pos_str = get_param(["字幕位置"], clip, style_cfg, sub_cfg, global_cfg, default="居中")
+        sub_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="30")
+        sub_color = sanitize_color(get_param(["文字-颜色"], clip, style_cfg, global_cfg, default="white"))
+        sub_pos_str = get_param(["字幕位置"], clip, style_cfg, global_cfg, default="底部居中")
         sub_pos_expr = calculate_position_expr(sub_pos_str, is_subtitle=True)
         
         filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{sub_clean}':fontcolor={sub_color}:fontsize={sub_size}:line_spacing=8:{sub_pos_expr}[outv];"
@@ -519,13 +519,13 @@ async def main():
     rules_csv = get_google_sheet_tab_csv(SHEET_URL, RULES_TAB_NAME)
     script_csv = get_google_sheet_tab_csv(SHEET_URL, SCRIPT_TAB_NAME)
     
-    global_cfg, sub_cfg, styles_cfg = parse_rules_tab(rules_csv)
+    global_cfg, styles_cfg = parse_rules_tab(rules_csv)
     clips = parse_script_tab(script_csv)
     
     if not clips:
         raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
     
-    drive_font_url = get_param(["字体", "全局字体"], {}, {}, global_cfg)
+    drive_font_url = get_param(["字体"], {}, {}, global_cfg)
     font_path = f"{TEMP_DIR}/custom_font.ttf"
     if drive_font_url and not os.path.exists(font_path):
         print("正在下载 Google Drive 自定义字体...", flush=True)
@@ -546,7 +546,7 @@ async def main():
         style_cfg = styles_cfg.get(clip["chapter"], {})
         
         await generate_audio_or_silent(clip, style_cfg, global_cfg, a_seg)
-        render_clip(idx, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_file=a_seg, output_path=v_seg)
+        render_clip(idx, clip, style_cfg, global_cfg, font_path, audio_file=a_seg, output_path=v_seg)
         video_segments.append(v_seg)
 
     print("所有片段渲染完成，开始合并视频...", flush=True)
