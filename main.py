@@ -7,8 +7,8 @@ from googleapiclient.http import MediaIoBaseDownload
 # ==============================================================================
 # ⚙️ 【主程序置顶配置区】
 # ==============================================================================
-RULES_TAB_NAME  = "config"         # 🌟 [*] config 控制页签
-SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script") # 🌟 [*] script 脚本页签
+RULES_TAB_NAME  = "config"         # 🌟 [*] config 页签
+SCRIPT_TAB_NAME = os.getenv("TARGET_TAB", "script") # 🌟 [*] script 页签
 SHEET_URL       = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "") 
@@ -59,7 +59,7 @@ def download_file_from_gdrive(file_id_or_url, output_path):
     return output_path
 
 def get_audio_duration(file_path):
-    """ 🌟 [*] 精准测量 TTS 生成的 MP3 时长，绝对防止提前断音 """
+    """ 🌟 [*] 精准测量 TTS 标准化 MP3 音频时长 """
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -74,7 +74,7 @@ def get_audio_duration(file_path):
     return 3.0
 
 def is_video_media(filepath):
-    """ 🌟 [*] 判断素材是视频还是静态图片 """
+    """ 🌟 [*] 判断素材是动态视频还是静态图片 """
     try:
         cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -144,7 +144,6 @@ def translate_to_english(text):
         return ""
 
 def sanitize_color(color_str):
-    """ 🌟 [*] 修复 grey 字母拼写与 RGB 色值转换 """
     if not color_str or not str(color_str).strip():
         return "white"
     c = str(color_str).strip()
@@ -166,7 +165,7 @@ def parse_rgb_to_ffmpeg(rgb_str):
     return "0x0000FF"
 
 def calculate_position_expr(pos_str, is_subtitle=False):
-    """ 🌟 [*] 全能坐标解析器（支持 居中、底部居中、居中偏移:X,Y、绝对坐标:X,Y） """
+    """ 🌟 [*] 坐标解析器（支持 居中、底部居中、居中偏移:X,Y、绝对坐标:X,Y） """
     pos = str(pos_str).strip()
     if not pos:
         return "x=(W-w)/2:y=H-h-80" if is_subtitle else "x=(W-w)/2:y=(H-h)/2"
@@ -203,13 +202,11 @@ def calculate_position_expr(pos_str, is_subtitle=False):
     return "x=(W-w)/2:y=H-h-80" if is_subtitle else "x=(W-w)/2:y=(H-h)/2"
 
 # ==============================================================================
-# 🛠️ 3. 解析与 3 层级联继承算法 (彻底杜绝硬编码覆盖)
+# 🛠️ 3. 解析与级联继承算法
 # ==============================================================================
 def get_param(keys, *dict_layers, default=""):
     """
-    🌟 [*] 核心级联函数：传入 (*dict_layers) 优先级队列
-    顺序：script 当前行 -> config 章节控制行 -> config 全局配置行
-    只要在某个层级找到有有效值，立即使用，绝不遮蔽！
+    🌟 [*] 级联函数：按传入字典优先级查找参数
     """
     if isinstance(keys, str):
         keys = [keys]
@@ -223,7 +220,7 @@ def get_param(keys, *dict_layers, default=""):
     return default
 
 def parse_rules_tab(csv_text):
-    """ 🌟 [*] 读取 config 页签：精准区分 全局配置 行 与 章节控制 行 """
+    """ 🌟 [*] 读取 config 页签 """
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
     if not rows: return {}, {}
@@ -326,8 +323,8 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
     spoken_text = clip["spoken_text"].strip()
     
     if spoken_text:
-        # 🌟 [*] 音色与语速读取：script -> config 章节行 -> config 全局配置行
-        voice = get_param(["配音-音色代号"], clip, style_cfg, global_cfg, default="zh-CN-XiaoxiaoNeural")
+        # 音色与语速读取：script -> config 章节控制行 -> config 全局配置行
+        voice = get_param(["配音-音色代号"], clip, style_cfg, global_cfg, default="zh-CN-YunxiNeural")
         rate_raw = get_param(["配音-语速"], clip, style_cfg, global_cfg, default="1.0")
         
         try:
@@ -337,9 +334,19 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         except Exception:
             rate_param = "+0%"
             
-        await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(audio_output_path)
+        raw_tts_path = audio_output_path + ".raw.mp3"
+        await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(raw_tts_path)
+        
+        # 🌟 [*] 强制标准化转码为 44100Hz 双声道 MP3，彻底解决采样率不一致引起的切音/音画脱节问题
+        std_cmd = [
+            "ffmpeg", "-y", "-i", raw_tts_path,
+            "-ar", "44100", "-ac", "2", "-b:a", "192k",
+            audio_output_path
+        ]
+        subprocess.run(std_cmd, capture_output=True, check=True)
+        if os.path.exists(raw_tts_path):
+            os.remove(raw_tts_path)
     else:
-        # 🌟 [*] 秒数读取：script 章节秒数 -> config 停留秒数 -> 全局配置
         dur = clip["duration"] if clip["duration"] else None
         if not dur:
             dur_str = get_param(["章节秒数", "停留秒数"], clip, style_cfg, global_cfg, default="3.0")
@@ -348,7 +355,7 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
             
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-            "-t", str(dur), "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2", audio_output_path
+            "-t", str(dur), "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2", "-b:a", "192k", audio_output_path
         ]
         subprocess.run(cmd, capture_output=True, check=True)
 
@@ -358,7 +365,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     spoken_text = clip["spoken_text"].strip()
     silent_text = clip["silent_text"].strip()
     
-    # 🌟 [*] 时长判定核心：有声文字固定取语音实际长度；无声卡片依次级联读取表格秒数
+    # 🌟 [*] 时长判定：有声配音固定取转码后的实际语音时长 + 0.4s 余量；无声卡片依次读取 script 秒数 -> config 秒数
     if spoken_text:
         clip_duration = get_audio_duration(audio_file) + 0.4
     else:
@@ -373,7 +380,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
 
     cmd = ["ffmpeg", "-y"]
     
-    # 🌟 [*] 图层素材查找：script 行 -> config 章节行 -> config 全局配置行
+    # 图层素材查找：script 行 -> config 章节控制行 -> config 全局配置行
     raw_l0 = get_param(["默认素材-layer0", "素材-layer0"], clip, style_cfg, global_cfg, default="")
     raw_l1 = get_param(["挂件-layer1", "挂件素材-layer1"], clip, style_cfg, global_cfg, default="")
     
@@ -410,7 +417,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         else:
             cmd.extend(["-i", path_bgm])
 
-    # 🌟 [*] 挂件抠图/缩放/位置控制：script -> config 章节行 -> config 全局配置行
+    # 挂件抠图与位置控制：script -> config 章节控制行 -> config 全局配置行
     if has_layer1:
         chroma_rgb = get_param(["挂件-扣图RGB", "绿幕扣图RGB"], clip, style_cfg, global_cfg, default="0,0,255")
         chroma_color = parse_rgb_to_ffmpeg(chroma_rgb)
@@ -441,7 +448,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
 
     # --------------------------------------------------------------------------
     # 🌟 A. 渲染【无声文字】（标题/PPT大字）
-    # 样式优先级：script -> config 章节行 (如片头 150号字/yellow) -> 全局配置
+    # 样式优先级：script -> config 章节控制行 (例如片头 150号字/yellow) -> 全局配置
     # --------------------------------------------------------------------------
     if silent_text:
         title_formatted = wrap_text_by_punctuation(silent_text, max_len=14)
@@ -460,12 +467,12 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
 
     # --------------------------------------------------------------------------
     # 🌟 B. 渲染【有声文字】（口播配音字幕）
-    # 样式优先级：script -> config 章节行 -> config 全局配置 (30号字/white/底部居中)
+    # 样式优先级：只读取 script -> 全局配置 (30号字/white/底部居中)，跳过 style_cfg 章节控制！
     # --------------------------------------------------------------------------
     if spoken_text:
         cn_sub = wrap_text_by_punctuation(spoken_text, max_len=20)
         
-        is_bilingual = (get_param(["双语字幕"], clip, style_cfg, global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
+        is_bilingual = (get_param(["双语字幕"], clip, global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
         if is_bilingual:
             en_raw = translate_to_english(spoken_text)
             en_sub = wrap_text_by_punctuation(en_raw, max_len=40)
@@ -478,22 +485,29 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
             f.write(sub_text_content)
         sub_clean = sub_file.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
         
-        sub_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="30")
-        sub_color = sanitize_color(get_param(["文字-颜色"], clip, style_cfg, global_cfg, default="white"))
-        sub_pos_str = get_param(["字幕位置"], clip, style_cfg, global_cfg, default="底部居中")
+        # 🌟 [*] 核心修改：不传入 style_cfg，确保配音字幕的样式（字号、颜色、位置）只听全局配置！
+        sub_size = get_param(["文字-字号"], clip, global_cfg, default="30")
+        sub_color = sanitize_color(get_param(["文字-颜色"], clip, global_cfg, default="white"))
+        sub_pos_str = get_param(["字幕位置"], clip, global_cfg, default="底部居中")
         sub_pos_expr = calculate_position_expr(sub_pos_str, is_subtitle=True)
         
         filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{sub_clean}':fontcolor={sub_color}:fontsize={sub_size}:line_spacing=8:{sub_pos_expr}[outv];"
     else:
         filter_chain += f"{curr_v}null[outv];"
 
+    # 🌟 [*] 声音混合：强制进行 44100Hz 2ch 格式化，防止音画脱节与断音
     bgm_vol = get_param(["BGM音量"], clip, style_cfg, global_cfg, default="1.0")
-    if has_bgm and bgm_vol:
-        filter_chain += f"[{audio_in_idx}:a]volume=1.0[a_tts];[{bgm_in_idx}:a]volume={bgm_vol}[a_bgm];[a_tts][a_bgm]amix=inputs=2:duration=first[outa]"
-    elif has_bgm:
-        filter_chain += f"[{audio_in_idx}:a]volume=1.0[a_tts];[{bgm_in_idx}:a]volume=1.0[a_bgm];[a_tts][a_bgm]amix=inputs=2:duration=first[outa]"
+    try: vol_val = float(bgm_vol)
+    except ValueError: vol_val = 1.0
+
+    if has_bgm:
+        filter_chain += (
+            f"[{audio_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[a_tts];"
+            f"[{bgm_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={vol_val}[a_bgm];"
+            f"[a_tts][a_bgm]amix=inputs=2:duration=first:dropout_transition=2[outa]"
+        )
     else:
-        filter_chain += f"[{audio_in_idx}:a]volume=1.0[outa]"
+        filter_chain += f"[{audio_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[outa]"
 
     cmd.extend([
         "-filter_complex", filter_chain,
@@ -525,7 +539,8 @@ async def main():
     if not clips:
         raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
     
-    drive_font_url = get_param(["字体"], {}, {}, global_cfg)
+    # 🌟 [*] 从全局配置中读取字体链接并下载
+    drive_font_url = get_param(["字体"], global_cfg, default="")
     font_path = f"{TEMP_DIR}/custom_font.ttf"
     if drive_font_url and not os.path.exists(font_path):
         print("正在下载 Google Drive 自定义字体...", flush=True)
@@ -534,8 +549,13 @@ async def main():
         except Exception as e:
             print(f"下载自定义字体失败，将使用系统默认字体: {e}", flush=True)
             
-    if not os.path.exists(font_path) or os.path.getsize(font_path) == 0:
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if not os.path.exists(font_path) or os.path.getsize(font_path) < 1000:
+        # 系统默认中文字体兜底
+        cjk_fallback = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+        if os.path.exists(cjk_fallback):
+            font_path = cjk_fallback
+        else:
+            font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
     video_segments = []
     
