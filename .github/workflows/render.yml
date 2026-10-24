@@ -7,6 +7,14 @@ on:
         description: 'Target Sheet Tab'
         required: true
         default: 'script'
+      resolution:
+        description: 'Video resolution (widthxheight, e.g. 1920x1080)'
+        required: false
+        default: '1920x1080'
+      video_fps:
+        description: 'Video frame rate, e.g. 30 / 60'
+        required: false
+        default: '30'
 
 jobs:
   render:
@@ -48,6 +56,9 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           TARGET_TAB: ${{ github.event.inputs.sheet_tab }}
+          VIDEO_RESOLUTION: ${{ github.event.inputs.resolution }}
+          VIDEO_FPS: ${{ github.event.inputs.video_fps }}
+
         run: python main.py
 
       - name: 7. Upload Artifact
