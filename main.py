@@ -178,13 +178,15 @@ def parse_rules_tab(csv_text):
         if "说明" in obj_name or "【" in obj_name: continue
         
         row_dict = {header[i]: row[i].strip() for i in range(1, len(header)) if i < len(row)}
-        if obj_name == "全局配置":
-            global_cfg = row_dict
+        
+        # 核心修复：将“全局配置”和“全局字幕”合并作为统一的 global_cfg 兜底
+        if obj_name in ["全局配置", "全局字幕"]:
+            for k, v in row_dict.items():
+                if v: global_cfg[k] = v
         else:
             styles_cfg[obj_name] = row_dict
             
     return global_cfg, styles_cfg
-
 def parse_script_tab(csv_text):
     lines = [line.strip() for line in csv_text.strip().splitlines() if line.strip()]
     rows = list(csv.reader(lines))
@@ -294,33 +296,38 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     
     cn_font_size = get_cascade_param("文字-字号", clip, style_cfg, global_cfg, default="45")
     font_color = get_cascade_param("文字-颜色", clip, style_cfg, global_cfg, default="white")
-    is_bilingual = (get_cascade_param("双语字幕", clip, style_cfg, global_cfg, default="关闭") == "开启")
     
+    # --- 强制双语字幕逻辑 ---
     cn_text_raw = clip["silent_text"] if clip["silent_text"] else clip["spoken_text"]
     cn_text = wrap_text_by_punctuation(cn_text_raw, max_len=18)
     
-    en_text = ""
-    if is_bilingual:
-        translated_en = translate_to_english(cn_text_raw)
-        en_text = wrap_text_by_punctuation(translated_en, max_len=38)
+    # 无论如何都自动翻译并生成英文字幕
+    translated_en = translate_to_english(cn_text_raw)
+    en_text = wrap_text_by_punctuation(translated_en, max_len=38)
 
+    # 写入中英文临时文件
     cn_sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}_cn.txt")
     with open(cn_sub_file, "w", encoding="utf-8") as f:
         f.write(cn_text)
+        
+    en_sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}_en.txt")
+    with open(en_sub_file, "w", encoding="utf-8") as f:
+        f.write(en_text)
 
     font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
     cn_sub_clean = os.path.abspath(cn_sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
+    en_sub_clean = os.path.abspath(en_sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
     cmd = ["ffmpeg", "-y"]
     
+    # 读取素材
     raw_l0 = get_cascade_param("默认素材-layer0", clip, style_cfg, global_cfg, default="")
     raw_l1 = get_cascade_param("挂件素材-layer1", clip, style_cfg, global_cfg, default="")
-    if not raw_l1:
-        raw_l1 = get_cascade_param("挂件-layer1", clip, style_cfg, global_cfg, default="")
-
+    
     path_l0 = resolve_asset_path(raw_l0)
     path_l1 = resolve_asset_path(raw_l1)
 
+    # 组装基础画面
     if path_l0 and os.path.exists(path_l0):
         cmd.extend(["-stream_loop", "-1", "-i", path_l0])
     else:
@@ -338,13 +345,14 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     if has_bgm:
         cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
 
-    # 修复点 2：正确的抠图(colorkey)、缩放(scale_ratio) 和定位(pos_expr) 滤镜
+    # --- 修复后的挂件定位与绿幕抠图逻辑 ---
     if has_layer1:
-        chroma_rgb = get_cascade_param("绿幕扣图RGB", clip, style_cfg, global_cfg, default="0,0,255")
+        # 注意这里已经改成了匹配表格的“挂件-扣图RGB”、“挂件-位置”、“挂件-缩放”
+        chroma_rgb = get_cascade_param("挂件-扣图RGB", clip, style_cfg, global_cfg, default="0,0,255")
         chroma_color = parse_rgb_to_ffmpeg(chroma_rgb)
         
-        overlay_pos_str = get_cascade_param("贴图位置", clip, style_cfg, global_cfg, default="右下角")
-        scale_str = get_cascade_param("贴图缩放", clip, style_cfg, global_cfg, default="35%").replace("%", "").strip()
+        overlay_pos_str = get_cascade_param("挂件-位置", clip, style_cfg, global_cfg, default="右下角")
+        scale_str = get_cascade_param("挂件-缩放", clip, style_cfg, global_cfg, default="35%").replace("%", "").strip()
         try: 
             scale_ratio = float(scale_str) / 100.0
         except ValueError: 
@@ -367,23 +375,24 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         audio_in_idx = 1
         bgm_in_idx = 2
 
-    # 字幕逻辑保持原有架构
-    if is_bilingual and en_text:
-        en_sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}_en.txt")
-        with open(en_sub_file, "w", encoding="utf-8") as f:
-            f.write(en_text)
-        en_sub_clean = os.path.abspath(en_sub_file).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
-        en_font_size = max(20, int(int(cn_font_size) * 0.55))
-        
-        filter_chain += (
-            f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{cn_sub_clean}':fontcolor={font_color}:fontsize={cn_font_size}:line_spacing=12:x=(W-w)/2:y=H-180[v1];"
-            f"[v1]drawtext=fontfile='{font_path_clean}':textfile='{en_sub_clean}':fontcolor={font_color}:fontsize={en_font_size}:line_spacing=8:x=(W-w)/2:y=H-90[outv];"
-        )
-    else:
-        filter_chain += (
-            f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{cn_sub_clean}':fontcolor={font_color}:fontsize={cn_font_size}:line_spacing=12:x=(W-w)/2:y=H-text_h-100[outv];"
-        )
+    # --- 修复后的字幕动态坐标排版 ---
+    # 动态读取表格中的“字幕位置”列
+    sub_pos_str = get_cascade_param("字幕位置", clip, style_cfg, global_cfg, default="底部")
+    
+    # 计算中文坐标。默认靠下
+    cn_pos_expr = calculate_position_expr(sub_pos_str, default_y_bottom=True)
+    
+    # 英文字母强行排在中文下方（Y轴加上60像素的偏移量）
+    en_pos_expr = cn_pos_expr.replace("y=", "y=60+") 
+    en_font_size = max(20, int(int(cn_font_size) * 0.55))
+    
+    # 强制将中文与英文一起画到视频上
+    filter_chain += (
+        f"[bg]drawtext=fontfile='{font_path_clean}':textfile='{cn_sub_clean}':fontcolor={font_color}:fontsize={cn_font_size}:line_spacing=12:{cn_pos_expr}[v1];"
+        f"[v1]drawtext=fontfile='{font_path_clean}':textfile='{en_sub_clean}':fontcolor={font_color}:fontsize={en_font_size}:line_spacing=8:{en_pos_expr}[outv];"
+    )
 
+    # 音频混合逻辑
     bgm_vol = get_cascade_param("BGM音量", clip, style_cfg, global_cfg, default="")
     if has_bgm and bgm_vol:
         filter_chain += f"[{audio_in_idx}:a]volume=1.0[a_tts];[{bgm_in_idx}:a]volume={bgm_vol}[a_bgm];[a_tts][a_bgm]amix=inputs=2:duration=first[outa]"
@@ -392,6 +401,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     else:
         filter_chain += f"[{audio_in_idx}:a]volume=1.0[outa]"
 
+    # 执行渲染
     cmd.extend([
         "-filter_complex", filter_chain,
         "-map", "[outv]", "-map", "[outa]",
