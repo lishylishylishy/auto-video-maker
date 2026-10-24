@@ -217,4 +217,4 @@ with col_btn:
 st.divider()
 
 # 高清内嵌表格视窗
-st.components.v1.iframe(SHEET_EMBED_URL, height=720, scrolling=True)
+st.components.v1.iframe(SHEET_EMBED_URL, height=520, scrolling=True)
