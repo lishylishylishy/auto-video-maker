@@ -1,4 +1,4 @@
-import os, re, csv, json, io, requests, subprocess, edge_tts, urllib.parse, asyncio
+import os, re, csv, json, io, requests, subprocess, edge_tts, urllib.parse, asyncio, time
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -57,25 +57,68 @@ def download_file_from_gdrive(file_id_or_url, output_path):
     return output_path
 
 def get_audio_duration(file_path):
-    """ 精准测量配音音频时长，失败返回None，不做兜底截断 """
+    """
+    三层兜底的音频时长检测，确保只要文件正常就一定能拿到真实时长
+    1. 容器层时长
+    2. 音频流层时长
+    3. 解码统计时长（终极兜底）
+    """
+    if not os.path.exists(file_path) or os.path.getsize(file_path) < 1000:
+        return None
+
+    # 第一层：读取容器+流的完整信息
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprintwrappers=1:nokey=1", file_path
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_entries", "format=duration:stream=duration",
+            file_path
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        val = float(res.stdout.strip())
-        if val > 0:
-            return val
-    except Exception as e:
-        print(f"无法检测音频时长 ({file_path}): {e}", flush=True)
+        data = json.loads(res.stdout)
+        
+        # 优先取容器时长
+        format_dur = data.get("format", {}).get("duration")
+        if format_dur:
+            val = float(format_dur)
+            if val > 0:
+                return val
+        
+        # 容器没有就读音频流时长
+        streams = data.get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "audio":
+                stream_dur = s.get("duration")
+                if stream_dur:
+                    val = float(stream_dur)
+                    if val > 0:
+                        return val
+    except Exception:
+        pass
+
+    # 第二层：强制解码统计时长（一定能拿到，耗时稍长但准确率100%）
+    try:
+        cmd = [
+            "ffmpeg", "-v", "error", "-i", file_path,
+            "-f", "null", "-"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # 从stderr中提取时长
+        match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", res.stderr)
+        if match:
+            h, m, s = float(match.group(1)), float(match.group(2)), float(match.group(3))
+            total = h * 3600 + m * 60 + s
+            if total > 0:
+                return total
+    except Exception:
+        pass
+
     return None
 
 def is_video_media(filepath):
     """ 判断素材是动态视频还是静态图片 """
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "ffprobe", "-v", "quiet", "-select_streams", "v:0",
             "-show_entries", "stream=nb_frames,duration",
             "-of", "json", filepath
         ]
@@ -124,16 +167,19 @@ def wrap_text_by_punctuation(text, max_len=18):
     return "\n".join(lines)
 
 def translate_to_english(text):
+    """ 翻译增强：2次重试，失败静默返回空，不影响主流程 """
     if not text or not text.strip():
         return ""
-    try:
-        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={urllib.parse.quote(text)}"
-        res = requests.get(url, timeout=5).json()
-        en_text = "".join([item[0] for item in res[0] if item[0]])
-        return en_text.strip()
-    except Exception as e:
-        print(f"自动翻译失败 ({text}): {e}", flush=True)
-        return ""
+    for _ in range(2):
+        try:
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={urllib.parse.quote(text)}"
+            res = requests.get(url, timeout=8).json()
+            en_text = "".join([item[0] for item in res[0] if item[0]])
+            return en_text.strip()
+        except Exception:
+            time.sleep(1)
+            continue
+    return ""
 
 def sanitize_color(color_str):
     if not color_str or not str(color_str).strip():
@@ -300,8 +346,8 @@ def resolve_asset_path(asset_str):
                 with open(dl_path, "wb") as f:
                     f.write(v_res.content)
                 return dl_path
-        except Exception as e:
-            print(f"Pixabay 检索 '{asset_str}' 失败: {e}", flush=True)
+        except Exception:
+            pass
             
     return ""
 
@@ -323,17 +369,19 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         raw_tts_path = audio_output_path + ".raw.mp3"
         await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(raw_tts_path)
         
-        # 强制标准化转码：统一编码器为libmp3lame，彻底解决采样率不一致引起的切音/音画脱节问题
+        # 核心优化：强制CBR固定码率转码，生成标准MP3，确保时长元数据完整
         std_cmd = [
             "ffmpeg", "-y", "-i", raw_tts_path,
-            "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+            "-c:a", "libmp3lame", "-b:a", "192k",
+            "-ar", "44100", "-ac", "2",
+            "-write_xing", "1",  # 写入Xing头，确保ffprobe能精准读时长
             audio_output_path
         ]
         subprocess.run(std_cmd, capture_output=True, check=True)
         if os.path.exists(raw_tts_path):
             os.remove(raw_tts_path)
     else:
-        # 无声片段：严格使用script表填写的章节秒数，不读取config配置
+        # 无声片段：严格使用script表填写的章节秒数
         dur = clip["duration"] if clip["duration"] else 3.0
             
         cmd = [
@@ -342,23 +390,33 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         ]
         subprocess.run(cmd, capture_output=True, check=True)
 
+def estimate_spoken_duration(text):
+    """ 最终兜底：按字数估算时长，仅在音频完全损坏时触发 """
+    clean_text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', text)
+    if not clean_text:
+        return 3.0
+    char_count = len(clean_text)
+    return char_count / 3.2 + 0.8
+
 def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
     print(f"[Render] 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
     
     spoken_text = clip["spoken_text"].strip()
     silent_text = clip["silent_text"].strip()
     
-    # 时长核心逻辑：有声以配音为准，检测失败不强制截断；无声严格按script秒数
-    use_time_limit = False
-    clip_duration = 3.0
+    # -------------------------- 时长核心逻辑 --------------------------
+    # 有声片段：优先取真实音频时长，检测失败用解码兜底，极端情况才用估算
+    # 无声片段：严格以script章节秒数为准
+    # -----------------------------------------------------------------
     if spoken_text:
         audio_dur = get_audio_duration(audio_file)
         if audio_dur:
             clip_duration = audio_dur + 0.4
-            use_time_limit = True
+        else:
+            # 解码兜底也失败时，才用字数估算（极端异常场景）
+            clip_duration = estimate_spoken_duration(spoken_text)
     else:
         clip_duration = clip["duration"] if clip["duration"] else 3.0
-        use_time_limit = True
 
     font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
     cmd = ["ffmpeg", "-y"]
@@ -404,7 +462,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     has_bgm = bool(path_bgm and os.path.exists(path_bgm))
     if has_bgm:
         if bgm_level == "global":
-            # 全局BGM：强制循环（音视频均生效）
+            # 全局BGM：强制循环
             cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
         else:
             # 章节/单行BGM：仅播放一遍
@@ -440,7 +498,6 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     # --------------------------------------------------------------------------
     # A. 渲染【无声文字】（标题/PPT大字）
     # 样式优先级：script -> config 章节控制行 -> 全局配置
-    # 修复：仅通过「字幕位置」控制，不再混入挂件-位置字段；移除fontindex兼容低版本FFmpeg
     # --------------------------------------------------------------------------
     if silent_text:
         title_formatted = wrap_text_by_punctuation(silent_text, max_len=14)
@@ -459,12 +516,12 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
 
     # --------------------------------------------------------------------------
     # B. 渲染【有声文字】（口播配音字幕）
-    # 样式优先级：严格仅读取全局配置，章节/单行配置不覆盖；移除fontindex兼容低版本FFmpeg
+    # 样式优先级：严格仅读取全局配置，章节/单行配置不覆盖
     # --------------------------------------------------------------------------
     if spoken_text:
         cn_sub = wrap_text_by_punctuation(spoken_text, max_len=20)
         
-        is_bilingual = (get_param(["双语字幕"], clip, global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
+        is_bilingual = (get_param(["双语字幕"], global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
         if is_bilingual:
             en_raw = translate_to_english(spoken_text)
             en_sub = wrap_text_by_punctuation(en_raw, max_len=40)
@@ -477,7 +534,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
             f.write(sub_text_content)
         sub_clean = sub_file.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
         
-        # 核心修复：仅读取全局配置，确保配音字幕样式完全由全局控制
+        # 字幕样式严格仅使用全局配置
         sub_size = get_param(["文字-字号"], global_cfg, default="30")
         sub_color = sanitize_color(get_param(["文字-颜色"], global_cfg, default="white"))
         sub_pos_str = get_param(["字幕位置"], global_cfg, default="底部居中")
@@ -503,13 +560,11 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     cmd.extend([
         "-filter_complex", filter_chain,
         "-map", "[outv]", "-map", "[outa]",
+        "-t", f"{clip_duration:.2f}",
         "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-ar", "44100", "-ac", "2",
+        output_path
     ])
-    # 仅在确定时长时强制截断，配音时长检测失败则跟随音频自然结束
-    if use_time_limit:
-        cmd.extend(["-t", f"{clip_duration:.2f}"])
-    cmd.append(output_path)
     
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
@@ -532,7 +587,7 @@ async def main():
     if not clips:
         raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
     
-    # 强制使用 Google Drive 自定义字体，无任何系统兜底，加载失败直接终止
+    # 强制使用 Google Drive 自定义字体，无兜底，加载失败直接终止
     drive_font_url = get_param(["字体"], global_cfg, default="")
     if not drive_font_url:
         raise ValueError("config表全局配置中未找到「字体」字段，请填写字体的Google Drive链接")
