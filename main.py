@@ -529,7 +529,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
 # 有声字幕（严格仅用全局配置）
     if spoken_text:
         # 1. 先将长句切分为短句（中文每行最大20字，避免出画）
-        cn_lines = wrap_text_by_punctuation(spoken_text, max_len=20).split('\n')
+        cn_lines = wrap_text_by_punctuation(spoken_text, max_len=21).split('\n')
         is_bilingual = (get_param(["双语字幕"], global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
         
         sub_segments = []
@@ -539,8 +539,8 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
             if is_bilingual:
                 # 2. 对切分好的中文短句单独进行英文翻译
                 en_line = translate_to_english(cn_line)
-                # 英文较长，限制长度40，若超过自动通过 \N 折行避免出画
-                en_sub = wrap_text_by_punctuation(en_line, max_len=40).replace('\n', '\\N')
+                # 英文强制单行
+                en_sub = en_line
                 # 中文在上，英文在下
                 sub_text = f"{cn_line}\\N{en_sub}"
             else:
