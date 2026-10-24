@@ -167,18 +167,22 @@ def wrap_text_by_punctuation(text, max_len=18):
     return "\n".join(lines)
 
 def translate_to_english(text):
-    """ 翻译增强：2次重试，失败静默返回空，不影响主流程 """
+    """ 翻译增强：模拟浏览器请求头，2次重试，降低被风控概率 """
     if not text or not text.strip():
         return ""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     for _ in range(2):
         try:
             url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={urllib.parse.quote(text)}"
-            res = requests.get(url, timeout=8).json()
+            res = requests.get(url, headers=headers, timeout=8).json()
             en_text = "".join([item[0] for item in res[0] if item[0]])
             return en_text.strip()
         except Exception:
-            time.sleep(1)
+            time.sleep(1.5)
             continue
+    print(f"翻译接口请求失败，将仅显示中文字幕：{text[:20]}...", flush=True)
     return ""
 
 def sanitize_color(color_str):
@@ -369,12 +373,13 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         raw_tts_path = audio_output_path + ".raw.mp3"
         await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(raw_tts_path)
         
-        # 核心优化：强制CBR固定码率转码，生成标准MP3，确保时长元数据完整
+        # 修复音画错位：标准化转码 + 移除开头静默帧 + 写入Xing头确保时长准确
         std_cmd = [
             "ffmpeg", "-y", "-i", raw_tts_path,
+            "-af", "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-50dB",
             "-c:a", "libmp3lame", "-b:a", "192k",
             "-ar", "44100", "-ac", "2",
-            "-write_xing", "1",  # 写入Xing头，确保ffprobe能精准读时长
+            "-write_xing", "1",
             audio_output_path
         ]
         subprocess.run(std_cmd, capture_output=True, check=True)
@@ -404,21 +409,19 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     spoken_text = clip["spoken_text"].strip()
     silent_text = clip["silent_text"].strip()
     
-    # -------------------------- 时长核心逻辑 --------------------------
-    # 有声片段：优先取真实音频时长，检测失败用解码兜底，极端情况才用估算
-    # 无声片段：严格以script章节秒数为准
-    # -----------------------------------------------------------------
+    # 时长核心逻辑：有声以真实配音时长为准，无声严格按script秒数
     if spoken_text:
         audio_dur = get_audio_duration(audio_file)
         if audio_dur:
             clip_duration = audio_dur + 0.4
         else:
-            # 解码兜底也失败时，才用字数估算（极端异常场景）
             clip_duration = estimate_spoken_duration(spoken_text)
     else:
         clip_duration = clip["duration"] if clip["duration"] else 3.0
 
-    font_path_clean = os.path.abspath(font_path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
+    # 修复字体路径：Linux环境取消过度转义，直接使用绝对路径
+    font_path_abs = os.path.abspath(font_path)
+    
     cmd = ["ffmpeg", "-y"]
     
     # 图层素材查找：script 行 -> config 章节控制行 -> config 全局配置行
@@ -498,25 +501,30 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     # --------------------------------------------------------------------------
     # A. 渲染【无声文字】（标题/PPT大字）
     # 样式优先级：script -> config 章节控制行 -> 全局配置
+    # 修复：字体路径直接写入，避免转义导致加载失败
     # --------------------------------------------------------------------------
     if silent_text:
         title_formatted = wrap_text_by_punctuation(silent_text, max_len=14)
         title_file = os.path.abspath(f"{TEMP_DIR}/title_{index}.txt")
         with open(title_file, "w", encoding="utf-8") as f:
             f.write(title_formatted)
-        title_clean = title_file.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
         
         title_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="150")
         title_color = sanitize_color(get_param(["文字-颜色"], clip, style_cfg, global_cfg, default="yellow"))
         title_pos_str = get_param(["字幕位置"], clip, style_cfg, global_cfg, default="居中")
         title_pos_expr = calculate_position_expr(title_pos_str, is_subtitle=False)
         
-        filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{title_clean}':fontcolor={title_color}:fontsize={title_size}:line_spacing=15:{title_pos_expr}[v_title];"
+        filter_chain += (
+            f"{curr_v}drawtext=fontfile={font_path_abs}:textfile={title_file}"
+            f":fontcolor={title_color}:fontsize={title_size}:line_spacing=15"
+            f":{title_pos_expr}[v_title];"
+        )
         curr_v = "[v_title]"
 
     # --------------------------------------------------------------------------
     # B. 渲染【有声文字】（口播配音字幕）
     # 样式优先级：严格仅读取全局配置，章节/单行配置不覆盖
+    # 修复：字体路径直接写入，确保加载正确
     # --------------------------------------------------------------------------
     if spoken_text:
         cn_sub = wrap_text_by_punctuation(spoken_text, max_len=20)
@@ -532,7 +540,6 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}.txt")
         with open(sub_file, "w", encoding="utf-8") as f:
             f.write(sub_text_content)
-        sub_clean = sub_file.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
         
         # 字幕样式严格仅使用全局配置
         sub_size = get_param(["文字-字号"], global_cfg, default="30")
@@ -540,7 +547,11 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         sub_pos_str = get_param(["字幕位置"], global_cfg, default="底部居中")
         sub_pos_expr = calculate_position_expr(sub_pos_str, is_subtitle=True)
         
-        filter_chain += f"{curr_v}drawtext=fontfile='{font_path_clean}':textfile='{sub_clean}':fontcolor={sub_color}:fontsize={sub_size}:line_spacing=8:{sub_pos_expr}[outv];"
+        filter_chain += (
+            f"{curr_v}drawtext=fontfile={font_path_abs}:textfile={sub_file}"
+            f":fontcolor={sub_color}:fontsize={sub_size}:line_spacing=8"
+            f":{sub_pos_expr}[outv];"
+        )
     else:
         filter_chain += f"{curr_v}null[outv];"
 
@@ -587,7 +598,7 @@ async def main():
     if not clips:
         raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
     
-    # 强制使用 Google Drive 自定义字体，无兜底，加载失败直接终止
+    # 强制加载Drive字体，增加有效性校验，失败直接终止
     drive_font_url = get_param(["字体"], global_cfg, default="")
     if not drive_font_url:
         raise ValueError("config表全局配置中未找到「字体」字段，请填写字体的Google Drive链接")
@@ -596,8 +607,22 @@ async def main():
     print("正在下载 Google Drive 自定义字体...", flush=True)
     download_file_from_gdrive(drive_font_url, font_path)
     
+    # 校验字体文件有效性
     if not os.path.exists(font_path) or os.path.getsize(font_path) < 1000:
-        raise RuntimeError("字体文件下载失败或无效，请检查字体链接的分享权限是否设置为「任何人可查看」")
+        raise RuntimeError("字体文件下载失败，文件大小异常，请检查字体链接的分享权限")
+    
+    # 用ffprobe验证字体是否可被FFmpeg识别
+    try:
+        test_cmd = [
+            "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=100x100",
+            "-vf", f"drawtext=fontfile={font_path}:text=test",
+            "-frames:v", "1", "-f", "null", "-"
+        ]
+        subprocess.run(test_cmd, capture_output=True, text=True, check=True)
+        print("字体加载验证通过", flush=True)
+    except subprocess.CalledProcessError as e:
+        print(f"字体验证失败，FFmpeg无法加载该字体：{e.stderr}", flush=True)
+        raise RuntimeError("自定义字体无法被FFmpeg加载，请检查字体文件格式")
 
     video_segments = []
     
