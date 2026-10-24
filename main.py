@@ -24,7 +24,7 @@ VALID_CHAPTERS = {"片头", "转场", "结尾", "男配音", "女配音"}
 # ==============================================================================
 def get_google_credentials():
     if not GCP_SA_KEY:
-        raise ValueError("❌ 未找到 GCP_SA_KEY 环境变量！")
+        raise ValueError("未找到 GCP_SA_KEY 环境变量！")
     info = json.loads(GCP_SA_KEY)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -69,7 +69,7 @@ def get_audio_duration(file_path):
         if val > 0:
             return val
     except Exception as e:
-        print(f"⚠️ 无法检测音频时长 ({file_path}): {e}", flush=True)
+        print(f"无法检测音频时长 ({file_path}): {e}", flush=True)
     return 3.0
 
 def is_video_media(filepath):
@@ -139,11 +139,11 @@ def translate_to_english(text):
         en_text = "".join([item[0] for item in res[0] if item[0]])
         return en_text.strip()
     except Exception as e:
-        print(f"⚠️ 自动翻译失败 ({text}): {e}", flush=True)
+        print(f"自动翻译失败 ({text}): {e}", flush=True)
         return ""
 
 def sanitize_color(color_str):
-    """ 🌟 [*] 颜色清洗工具：防止表格里的 grey (带有 e) 导致 FFmpeg 崩溃[cite: 9, 10] """
+    """ 🌟 [*] 颜色清洗工具：防止表格里的 grey 导致 FFmpeg 崩溃 """
     if not color_str or not str(color_str).strip():
         return "black"
     c = str(color_str).strip()
@@ -324,7 +324,7 @@ def resolve_asset_path(asset_str):
                     f.write(v_res.content)
                 return dl_path
         except Exception as e:
-            print(f"⚠️ Pixabay 检索 '{asset_str}' 失败: {e}", flush=True)
+            print(f"Pixabay 检索 '{asset_str}' 失败: {e}", flush=True)
             
     return ""
 
@@ -357,7 +357,7 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         subprocess.run(cmd, capture_output=True, check=True)
 
 def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_file, output_path):
-    print(f"🎬 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
+    print(f"[Render] 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
     
     spoken_text = clip["spoken_text"].strip()
     silent_text = clip["silent_text"].strip()
@@ -390,7 +390,7 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
             cmd.extend(["-loop", "1", "-i", path_l0])
     else:
         bg_color_raw = get_param(["默认底色-layer0", "兜底底色"], clip, style_cfg, global_cfg, default="black")
-        bg_color = sanitize_color(bg_color_raw) # 🌟 [*] 修复：防止 grey 导致 FFmpeg 无法找到颜色的崩溃[cite: 9, 10]
+        bg_color = sanitize_color(bg_color_raw)
         cmd.extend(["-f", "lavfi", "-i", f"color=c={bg_color}:s=1920x1080"])
 
     # Layer 1 挂件
@@ -506,7 +506,7 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
     
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        print(f"❌ Clip {index} FFmpeg 错误日志:\n{res.stderr}", flush=True)
+        print(f"Clip {index} FFmpeg 错误日志:\n{res.stderr}", flush=True)
         raise subprocess.CalledProcessError(res.returncode, cmd, output=res.stdout, stderr=res.stderr)
 
 # ==============================================================================
@@ -514,4 +514,64 @@ def render_clip(index, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_fi
 # ==============================================================================
 async def main():
     os.makedirs(TEMP_DIR, exist_ok=True)
-    print("🚀
+    print("开始读取 Google 表格配置...", flush=True)
+    
+    rules_csv = get_google_sheet_tab_csv(SHEET_URL, RULES_TAB_NAME)
+    script_csv = get_google_sheet_tab_csv(SHEET_URL, SCRIPT_TAB_NAME)
+    
+    global_cfg, sub_cfg, styles_cfg = parse_rules_tab(rules_csv)
+    clips = parse_script_tab(script_csv)
+    
+    if not clips:
+        raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
+    
+    drive_font_url = get_param(["字体", "全局字体"], {}, {}, global_cfg)
+    font_path = f"{TEMP_DIR}/custom_font.ttf"
+    if drive_font_url and not os.path.exists(font_path):
+        print("正在下载 Google Drive 自定义字体...", flush=True)
+        try:
+            download_file_from_gdrive(drive_font_url, font_path)
+        except Exception as e:
+            print(f"下载自定义字体失败，将使用系统默认字体: {e}", flush=True)
+            
+    if not os.path.exists(font_path) or os.path.getsize(font_path) == 0:
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+    video_segments = []
+    
+    for idx, clip in enumerate(clips, 1):
+        v_seg = f"{TEMP_DIR}/clip_{idx}.mp4"
+        a_seg = f"{TEMP_DIR}/clip_{idx}.mp3"
+        
+        style_cfg = styles_cfg.get(clip["chapter"], {})
+        
+        await generate_audio_or_silent(clip, style_cfg, global_cfg, a_seg)
+        render_clip(idx, clip, style_cfg, global_cfg, sub_cfg, font_path, audio_file=a_seg, output_path=v_seg)
+        video_segments.append(v_seg)
+
+    print("所有片段渲染完成，开始合并视频...", flush=True)
+    list_file = f"{TEMP_DIR}/concat_list.txt"
+    valid_segments = []
+    with open(list_file, "w", encoding="utf-8") as f:
+        for seg in video_segments:
+            if os.path.exists(seg) and os.path.getsize(seg) > 0:
+                clean_path = os.path.abspath(seg).replace("'", "'\\''")
+                f.write(f"file '{clean_path}'\n")
+                valid_segments.append(seg)
+
+    if not valid_segments:
+        raise RuntimeError("没有生成任何有效的视频片段！")
+
+    concat_cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", list_file,
+        "-c", "copy",
+        OUTPUT_VIDEO_NAME
+    ]
+    subprocess.run(concat_cmd, check=True)
+    print("视频渲染成功导出！", flush=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
