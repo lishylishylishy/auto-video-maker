@@ -144,7 +144,7 @@ def fetch_rendered_video_bytes(run_id):
 # 📌 侧边控制面板（渲染控制、实时状态与内嵌视频播放器）
 # ==============================================================================
 with st.sidebar:
-    st.title("🎬 Studio Control")
+    st.title("🎬 Auto-Studio")
     st.markdown("---")
     
     target_tab = st.text_input("Target Sheet Tab", value="script", help="输入 Google Sheet 底部的 Tab 名称")
@@ -160,7 +160,7 @@ with st.sidebar:
             st.error(f"❌ 启动失败：{msg}")
 
     st.markdown("---")
-    st.subheader("📡 Live Action Status")
+    st.subheader("📡 Process Status")
     
     run_info = get_latest_workflow_run()
     if run_info:
@@ -185,7 +185,7 @@ with st.sidebar:
                 if video_bytes:
                     st.video(video_bytes)
                     st.download_button(
-                        label="⬇️ 一键下载视频成品",
+                        label="⬇️下载视频",
                         data=video_bytes,
                         file_name="final_output.mp4",
                         mime="video/mp4",
