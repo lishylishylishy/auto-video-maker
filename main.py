@@ -364,7 +364,7 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         ]
         subprocess.run(cmd, capture_output=True, check=True)
 
-def generate_ass_subtitle(output_path, text, font_path, font_size, color, alignment, margin_h, margin_v, line_spacing=8):
+def generate_ass_subtitle(output_path, text, font_size, color, alignment, margin_h, margin_v, duration, vid_w=1920, vid_h=1080, line_spacing=8):
     """ 生成标准ASS字幕文件，精准控制字体、位置、换行 """
     # 处理换行
     lines = text.split("\n")
@@ -375,8 +375,8 @@ def generate_ass_subtitle(output_path, text, font_path, font_size, color, alignm
     
     ass_content = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: {vid_w}
+PlayResY: {vid_h}
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
@@ -394,7 +394,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         f.write(ass_content)
     return output_path
 
-def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
+def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, audio_file, output_path):
     print(f"[Render] 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
     
     spoken_text = clip["spoken_text"].strip()
@@ -425,7 +425,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     else:
         bg_color_raw = get_param(["默认底色-layer0", "兜底底色"], clip, style_cfg, global_cfg, default="black")
         bg_color = parse_rgb_to_ffmpeg(bg_color_raw)
-        cmd.extend(["-f", "lavfi", "-i", f"color=c={bg_color}:s=1920x1080"])
+        cmd.extend(["-f", "lavfi", "-i", f"color=c={bg_color}:s={vid_w}x{vid_h}"])
 
     # Layer1 挂件
     has_layer1 = bool(path_l1 and os.path.exists(path_l1))
@@ -458,7 +458,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     # 构建滤镜链
     filter_chains = []
     # 背景基础处理
-    filter_chains.append("[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg_base]")
+    filter_chains.append("[0:v]setpts=PTS-STARTPTS,scale={vid_w}:{vid_h}:force_original_aspect_ratio=increase,crop={vid_w}:{vid_h}[bg_base]")
     
     # 挂件合成
     if has_layer1:
@@ -468,7 +468,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         scale_str = get_param(["挂件-缩放", "贴图缩放"], clip, style_cfg, global_cfg, default="50%").replace("%", "").strip()
         try: scale_ratio = float(scale_str) / 100.0
         except ValueError: scale_ratio = 0.50
-        target_overlay_w = int(1920 * scale_ratio)
+        target_overlay_w = int(vid_w * scale_ratio)
         pos_expr = ""
         pos = overlay_pos_str.strip()
         if pos in ["居中", "居中居中"]:
@@ -506,8 +506,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         align, mh, mv = calc_ass_position(title_pos_str, is_subtitle=False)
         
         title_ass_path = os.path.abspath(f"{TEMP_DIR}/title_{index}.ass")
-        generate_ass_subtitle(title_ass_path, title_text, font_path, int(title_size), title_color, align, mh, mv)
-        
+        generate_ass_subtitle(title_ass_path, title_text, int(title_size), title_color, align, mh, mv, clip_duration, vid_w, vid_h)
         filter_chains.append(f"{curr_v}ass={title_ass_path}[v_with_title]")
         curr_v = "[v_with_title]"
 
@@ -531,7 +530,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         align, mh, mv = calc_ass_position(sub_pos_str, is_subtitle=True)
         
         sub_ass_path = os.path.abspath(f"{TEMP_DIR}/sub_{index}.ass")
-        generate_ass_subtitle(sub_ass_path, sub_text, font_path, int(sub_size), sub_color, align, mh, mv)
+        generate_ass_subtitle(sub_ass_path, sub_text, int(sub_size), sub_color, align, mh, mv, clip_duration, vid_w, vid_h)
         
         filter_chains.append(f"{curr_v}ass={sub_ass_path}[outv]")
     else:
@@ -610,6 +609,13 @@ async def main():
         f.write(font_conf)
     os.environ["FONTCONFIG_FILE"] = os.path.abspath(f"{TEMP_DIR}/fonts.conf")
 
+    # 解析全局视频分辨率，支持表格自定义
+    resolution_raw = get_param(["视频分辨率"], global_cfg, default="1920x1080")
+    try:
+        vid_w, vid_h = [int(x) for x in resolution_raw.lower().split("x")]
+    except Exception:
+        vid_w, vid_h = 1920, 1080
+
     # 渲染所有片段
     video_segments = []
     for idx, clip in enumerate(clips, 1):
@@ -617,8 +623,9 @@ async def main():
         a_seg = f"{TEMP_DIR}/clip_{idx}.mp3"
         style_cfg = styles_cfg.get(clip["chapter"], {})
         await generate_audio_or_silent(clip, style_cfg, global_cfg, a_seg)
-        render_clip(idx, clip, style_cfg, global_cfg, font_path, audio_file=a_seg, output_path=v_seg)
+        render_clip(idx, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, audio_file=a_seg, output_path=v_seg)
         video_segments.append(v_seg)
+
 
     print("所有片段渲染完成，开始合并视频...", flush=True)
     
