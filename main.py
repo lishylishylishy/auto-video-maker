@@ -458,7 +458,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
     # 构建滤镜链
     filter_chains = []
     # 背景基础处理
-    filter_chains.append("[0:v]setpts=PTS-STARTPTS,scale={vid_w}:{vid_h}:force_original_aspect_ratio=increase,crop={vid_w}:{vid_h}[bg_base]")
+    filter_chains.append(f"[0:v]setpts=PTS-STARTPTS,scale={vid_w}:{vid_h}:force_original_aspect_ratio=increase,crop={vid_w}:{vid_h}[bg_base]")
     
     # 挂件合成
     if has_layer1:
