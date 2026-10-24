@@ -71,7 +71,7 @@ def get_audio_duration(file_path):
         return 3.0
 
 # ==============================================================================
-# ✂️ 2. 标点符号自动断句与实时翻译模块
+# ✂️ 2. 标点符号断句、翻译与格式化算法 (新增位置/颜色解析)
 # ==============================================================================
 def wrap_text_by_punctuation(text, max_len=18):
     if not text or len(text) <= max_len:
@@ -119,6 +119,40 @@ def translate_to_english(text):
     except Exception as e:
         print(f"⚠️ 自动翻译失败 ({text}): {e}", flush=True)
         return ""
+
+def parse_rgb_to_ffmpeg(rgb_str):
+    """将 RGB 转换为 FFmpeg 支持的十六进制颜色"""
+    if not rgb_str or not rgb_str.strip(): return "0x0000FF"
+    cleaned = rgb_str.replace("，", ",").strip()
+    parts = [p.strip() for p in cleaned.split(",")]
+    if len(parts) == 3:
+        try:
+            r, g, b = [int(p) for p in parts]
+            return f"0x{r:02X}{g:02X}{b:02X}"
+        except ValueError: pass
+    return "0x0000FF"
+
+def calculate_position_expr(pos_str, default_y_bottom=True):
+    """解析像素级坐标与方位表达式"""
+    pos = str(pos_str).strip()
+    if "绝对坐标:" in pos:
+        coords = pos.replace("绝对坐标:", "").split(",")
+        return f"x={coords[0].strip()}:y={coords[1].strip()}"
+    elif "居中偏移:" in pos:
+        offsets = pos.replace("居中偏移:", "").split(",")
+        return f"x=(W-w)/2+{offsets[0].strip()}:y=(H-h)/2+{offsets[1].strip()}"
+    elif "底部偏移:" in pos:
+        offsets = pos.replace("底部偏移:", "").split(",")
+        return f"x=(W-w)/2+{offsets[0].strip()}:y=H-h-80+{offsets[1].strip()}"
+    
+    if pos == "左上角": return "x=40:y=40"
+    elif pos == "右上角": return "x=W-w-40:y=40"
+    elif pos == "左下角": return "x=40:y=H-h-120"
+    elif pos == "右下角": return "x=W-w-40:y=H-h-120"
+    elif pos == "居中": return "x=(W-w)/2:y=(H-h)/2"
+    elif pos == "顶部": return "x=(W-w)/2:y=60"
+    elif pos == "底部": return "x=(W-w)/2:y=H-h-80"
+    return "x=(W-w)/2:y=H-h-80" if default_y_bottom else "x=(W-w)/2:y=(H-h)/2"
 
 # ==============================================================================
 # 🛠️ 3. 解析与层级继承
@@ -179,7 +213,9 @@ def parse_script_tab(csv_text):
         except ValueError:
             duration = None
 
-        clips.append({
+        # 修复点 1：将该行的全部列数据保留，确保 get_cascade_param 能读到剧本中覆盖的控制列
+        clip_data = row_dict.copy()
+        clip_data.update({
             "bg_layer0": bg_layer0,
             "bg_layer1": bg_layer1,
             "duration": duration,
@@ -187,6 +223,8 @@ def parse_script_tab(csv_text):
             "silent_text": silent_text,
             "spoken_text": spoken_text
         })
+        clips.append(clip_data)
+        
     return clips
 
 # ==============================================================================
@@ -251,7 +289,7 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
 def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, output_path):
     print(f"🎬 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
     
-    # 测量音频精确时长（防止卡死死循环的关键步骤）
+    # 测量音频精确时长
     clip_duration = get_audio_duration(audio_file)
     
     cn_font_size = get_cascade_param("文字-字号", clip, style_cfg, global_cfg, default="45")
@@ -300,11 +338,25 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     if has_bgm:
         cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
 
+    # 修复点 2：正确的抠图(colorkey)、缩放(scale_ratio) 和定位(pos_expr) 滤镜
     if has_layer1:
+        chroma_rgb = get_cascade_param("绿幕扣图RGB", clip, style_cfg, global_cfg, default="0,0,255")
+        chroma_color = parse_rgb_to_ffmpeg(chroma_rgb)
+        
+        overlay_pos_str = get_cascade_param("贴图位置", clip, style_cfg, global_cfg, default="右下角")
+        scale_str = get_cascade_param("贴图缩放", clip, style_cfg, global_cfg, default="35%").replace("%", "").strip()
+        try: 
+            scale_ratio = float(scale_str) / 100.0
+        except ValueError: 
+            scale_ratio = 0.35
+            
+        target_overlay_w = int(1920 * scale_ratio)
+        pos_expr = calculate_position_expr(overlay_pos_str, default_y_bottom=False)
+
         filter_chain = (
             f"[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg_base];"
-            f"[1:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[l1];"
-            f"[bg_base][l1]overlay=0:0[bg];"
+            f"[1:v]setpts=PTS-STARTPTS,scale={target_overlay_w}:-1,colorkey={chroma_color}:0.3:0.2[l1];"
+            f"[bg_base][l1]overlay={pos_expr}[bg];"
         )
         audio_in_idx = 2
         bgm_in_idx = 3
@@ -315,6 +367,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         audio_in_idx = 1
         bgm_in_idx = 2
 
+    # 字幕逻辑保持原有架构
     if is_bilingual and en_text:
         en_sub_file = os.path.abspath(f"{TEMP_DIR}/sub_{index}_en.txt")
         with open(en_sub_file, "w", encoding="utf-8") as f:
@@ -339,7 +392,6 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     else:
         filter_chain += f"[{audio_in_idx}:a]volume=1.0[outa]"
 
-    # 🌟 增加 -t 参数，精确约束时长，防止 FFmpeg 死循环
     cmd.extend([
         "-filter_complex", filter_chain,
         "-map", "[outv]", "-map", "[outa]",
