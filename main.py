@@ -72,6 +72,26 @@ def get_audio_duration(file_path):
         print(f"⚠️ 无法检测音频时长 ({file_path}): {e}", flush=True)
     return 3.0
 
+def is_video_media(filepath):
+    """判断素材文件是动态视频还是静态图片"""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=nb_frames,duration",
+            "-of", "json", filepath
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info = json.loads(res.stdout)
+        streams = info.get("streams", [])
+        if streams:
+            nb_frames = int(streams[0].get("nb_frames", 0) or 0)
+            duration = float(streams[0].get("duration", 0) or 0)
+            if nb_frames > 1 or duration > 0.1:
+                return True
+    except Exception:
+        pass
+    return False
+
 # ==============================================================================
 # ✂️ 2. 标点符号断句、翻译与格式化算法
 # ==============================================================================
@@ -135,16 +155,16 @@ def parse_rgb_to_ffmpeg(rgb_str):
     return "0x0000FF"
 
 def calculate_position_expr(pos_str, is_subtitle=False):
-    """解析像素级坐标与方位表达式（修复 +- 格式化 Bug）"""
+    """解析像素级坐标与方位表达式"""
     pos = str(pos_str).strip()
     
-    if "绝对坐标:" in pos or "绝对坐标" in pos:
+    if "绝对坐标" in pos:
         raw_coords = pos.replace("绝对坐标:", "").replace("绝对坐标", "").strip()
         parts = [p.strip() for p in raw_coords.split(",") if p.strip()]
         if len(parts) >= 2:
             return f"x={parts[0]}:y={parts[1]}"
             
-    elif "居中偏移:" in pos or "居中偏移" in pos:
+    elif "居中偏移" in pos:
         raw_offsets = pos.replace("居中偏移:", "").replace("居中偏移", "").strip()
         parts = [p.strip() for p in raw_offsets.split(",") if p.strip()]
         if len(parts) >= 2:
@@ -156,7 +176,7 @@ def calculate_position_expr(pos_str, is_subtitle=False):
                 return f"x=(W-w)/2{ox_str}:y=(H-h)/2{oy_str}"
             except ValueError: pass
             
-    elif "底部偏移:" in pos or "底部偏移" in pos:
+    elif "底部偏移" in pos:
         raw_offsets = pos.replace("底部偏移:", "").replace("底部偏移", "").strip()
         parts = [p.strip() for p in raw_offsets.split(",") if p.strip()]
         if len(parts) >= 2:
@@ -181,7 +201,7 @@ def calculate_position_expr(pos_str, is_subtitle=False):
     return "x=(W-w)/2:y=(H-h)/2"
 
 # ==============================================================================
-# 🛠️ 3. 解析与层级继承 (鲁棒级联查找)
+# 🛠️ 3. 解析与层级继承
 # ==============================================================================
 def get_param(keys, clip, style_cfg, global_cfg, default=""):
     """多 key 兼容与 script -> style -> global 级联查找算法"""
@@ -218,7 +238,6 @@ def parse_rules_tab(csv_text):
         
         row_dict = {header[i]: row[i].strip() for i in range(1, len(header)) if i < len(row)}
         
-        # 将“全局配置”与“全局字幕”合并作为 unified global_cfg
         if obj_name in ["全局配置", "全局字幕"]:
             for k, v in row_dict.items():
                 if v: global_cfg[k] = v
@@ -278,7 +297,7 @@ def resolve_asset_path(asset_str):
         
     is_gdrive_id = bool(re.match(r'^[a-zA-Z0-9_-]{25,50}$', asset_str))
     if "drive.google.com" in asset_str or is_gdrive_id:
-        dl_path = f"{TEMP_DIR}/gdrive_{abs(hash(asset_str))}.mp4"
+        dl_path = f"{TEMP_DIR}/gdrive_{abs(hash(asset_str))}"
         if not os.path.exists(dl_path):
             download_file_from_gdrive(asset_str, dl_path)
         return dl_path
@@ -308,7 +327,6 @@ def resolve_asset_path(asset_str):
 async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_path):
     spoken_text = clip["spoken_text"].strip()
     
-    # 只有当章节包含“有声文字”时才去生成语音
     if spoken_text:
         voice = get_param(["配音-音色代号", "男声代码", "女声代码"], clip, style_cfg, global_cfg, default="zh-CN-XiaoxiaoNeural")
         rate_raw = get_param(["配音-语速", "男声语速", "女声语速"], clip, style_cfg, global_cfg, default="1.0")
@@ -322,11 +340,10 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
             
         await edge_tts.Communicate(spoken_text, voice, rate=rate_param).save(audio_output_path)
     else:
-        # 无声切片：按照剧本或配置规定的秒数生成静音 MP3
         dur = clip["duration"] if clip["duration"] else 3.0
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-            "-t", str(dur), "-c:a", "libmp3lame", audio_output_path
+            "-t", str(dur), "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2", audio_output_path
         ]
         subprocess.run(cmd, capture_output=True, check=True)
 
@@ -335,7 +352,6 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     
     spoken_text = clip["spoken_text"].strip()
     
-    # 时长确定策略：有声文字取绝对语音时长，无声卡片取配置秒数
     if spoken_text:
         clip_duration = get_audio_duration(audio_file)
     else:
@@ -349,15 +365,12 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     cn_font_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="45")
     font_color = get_param(["文字-颜色"], clip, style_cfg, global_cfg, default="white")
     
-    # 优先展示有声文字，若没有则展示无声文字
     cn_text_raw = spoken_text if spoken_text else clip["silent_text"].strip()
     cn_text = wrap_text_by_punctuation(cn_text_raw, max_len=18)
     
-    # 自动多语种翻译
     translated_en = translate_to_english(cn_text_raw)
     en_text = wrap_text_by_punctuation(translated_en, max_len=38)
 
-    # 制作双排字幕混合文件（中文在上一排，英文在下一排，绝无重叠）
     combined_sub_text = f"{cn_text}\n{en_text}" if en_text else cn_text
     sub_file_path = os.path.abspath(f"{TEMP_DIR}/sub_{index}.txt")
     with open(sub_file_path, "w", encoding="utf-8") as f:
@@ -374,16 +387,23 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     path_l0 = resolve_asset_path(raw_l0)
     path_l1 = resolve_asset_path(raw_l1)
 
-    # Layer 0: 铺底视频/图片
+    # Layer 0 背景
     if path_l0 and os.path.exists(path_l0):
-        cmd.extend(["-stream_loop", "-1", "-i", path_l0])
+        if is_video_media(path_l0):
+            cmd.extend(["-stream_loop", "-1", "-i", path_l0])
+        else:
+            cmd.extend(["-loop", "1", "-i", path_l0])
     else:
         bg_color = get_param(["默认底色-layer0", "兜底底色"], clip, style_cfg, global_cfg, default="black")
         cmd.extend(["-f", "lavfi", "-i", f"color=c={bg_color}:s=1920x1080"])
 
+    # Layer 1 挂件
     has_layer1 = bool(path_l1 and os.path.exists(path_l1))
     if has_layer1:
-        cmd.extend(["-stream_loop", "-1", "-i", path_l1])
+        if is_video_media(path_l1):
+            cmd.extend(["-stream_loop", "-1", "-i", path_l1])
+        else:
+            cmd.extend(["-loop", "1", "-i", path_l1])
 
     cmd.extend(["-i", audio_file])
     
@@ -391,9 +411,12 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
     path_bgm = resolve_asset_path(raw_bgm)
     has_bgm = bool(path_bgm and os.path.exists(path_bgm))
     if has_bgm:
-        cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
+        if is_video_media(path_bgm):
+            cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
+        else:
+            cmd.extend(["-i", path_bgm])
 
-    # Layer 1: 挂件绿幕/蓝幕抠图与坐标控制
+    # 滤镜链
     if has_layer1:
         chroma_rgb = get_param(["挂件-扣图RGB", "挂件-抠图RGB", "绿幕扣图RGB"], clip, style_cfg, global_cfg, default="0,0,255")
         chroma_color = parse_rgb_to_ffmpeg(chroma_rgb)
@@ -420,7 +443,7 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         audio_in_idx = 1
         bgm_in_idx = 2
 
-    # Layer 2: 字幕排版渲染
+    # 字幕渲染
     sub_pos_str = get_param(["字幕位置"], clip, style_cfg, global_cfg, default="居中")
     sub_pos_expr = calculate_position_expr(sub_pos_str, is_subtitle=True)
     
@@ -441,7 +464,8 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, audio_file, outpu
         "-filter_complex", filter_chain,
         "-map", "[outv]", "-map", "[outa]",
         "-t", f"{clip_duration:.2f}",
-        "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+        "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2",
         output_path
     ])
     
@@ -508,10 +532,7 @@ async def main():
         "-f", "concat",
         "-safe", "0",
         "-i", list_file,
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
+        "-c", "copy",
         OUTPUT_VIDEO_NAME
     ]
     subprocess.run(concat_cmd, check=True)
