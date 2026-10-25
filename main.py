@@ -527,9 +527,8 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
         
         title_ass_path = os.path.abspath(f"{TEMP_DIR}/title_{index}.ass")
         generate_ass_subtitle(title_ass_path, title_text, int(title_size), title_color, align, mh, mv, clip_duration, vid_w, vid_h)
-        ff_ass_title = escape_ff_path(title_ass_path)#增加识别字体代码
-        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))#增加识别字体代码
-        filter_chains.append(f"{curr_v}ass={ff_ass_title}:fontsdir={ff_fonts_dir}[v_with_title]")#增加识别字体代码
+        ff_ass_title = escape_ff_path(title_ass_path)
+        filter_chains.append(f"{curr_v}ass={ff_ass_title}[v_with_title]")
         curr_v = "[v_with_title]"
 
     # 有声字幕（严格仅用全局配置）
@@ -567,9 +566,8 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
         # 传入 sub_segments 数组，由 generate_ass_subtitle 自动计算分段排期
         generate_ass_subtitle(sub_ass_path, sub_segments, int(sub_size), sub_color, align, mh, mv, clip_duration, vid_w, vid_h)
         
-        ff_ass_sub = escape_ff_path(sub_ass_path)#增加识别字体代码
-        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))#增加识别字体代码
-        filter_chains.append(f"{curr_v}ass={ff_ass_sub}:fontsdir={ff_fonts_dir}[outv]")#增加识别字体代码
+        ff_ass_sub = escape_ff_path(sub_ass_path)
+        filter_chains.append(f"{curr_v}ass={ff_ass_sub}[outv]")
     else:
         filter_chains.append(f"{curr_v}null[outv]")
 
@@ -617,32 +615,55 @@ async def main():
     if not clips:
         raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
     
-    # 字体加载：强制校验，失败直接终止
-    # 1. 直接从 Google Sheets 拿到字体网盘链接
-    drive_font_url = get_param(["字体"], global_cfg, default="")
-    if not drive_font_url:
+# ================= 核心重构：多链接字体下载与系统底层注册 =================
+    # 1. 直接从 Google Sheets 拿到字体网盘链接（支持多个，用逗号/分号/空格隔开）
+    drive_font_url_raw = get_param(["字体"], global_cfg, default="")
+    if not drive_font_url_raw:
         raise ValueError("请在 Google Sheets 的全局配置中填写字体的 Google Drive 链接")
 
-    font_path = os.path.abspath(f"{TEMP_DIR}/custom_font.ttf")
-    print(f"正在从网盘下载字体...", flush=True)
-
-    # 2. 直接按网盘链接下载
-    download_file_from_gdrive(drive_font_url, font_path)
-
-    # 3. 简单拦一下错（只要文件下出来了且不是0KB空文件，就放行）
-    if not os.path.exists(font_path) or os.path.getsize(font_path) < 1000:
-        raise RuntimeError("字体下载失败，请检查你的 Google Drive 链接是否公开且正确！")
+    # 使用正则拆分多个链接
+    font_urls = [url.strip() for url in re.split(r'[,;|\s]+', drive_font_url_raw) if url.strip()]
     
-# 动态获取字体的内部真实名称，存入环境变量供生成 ASS 时使用
-    try:
-        # GitHub Actions 自带 fc-query 工具，精准提取字体出厂真名
-        fc_res = subprocess.run(["fc-query", "-f", "%{family}\n", font_path], capture_output=True, text=True)
-        real_font = fc_res.stdout.strip().split(',')[0].strip()
-        os.environ["REAL_FONT_NAME"] = real_font if real_font else "Arial"
-        print(f"成功识别动态字体真名: {os.environ['REAL_FONT_NAME']}", flush=True)
-    except Exception as e:
-        print(f"提取字体名称失败，使用兜底字体: {e}", flush=True)
-        os.environ["REAL_FONT_NAME"] = "Arial"
+    # 准备 Linux 系统级字体库目录
+    import shutil
+    linux_font_dir = os.path.expanduser("~/.local/share/fonts")
+    os.makedirs(linux_font_dir, exist_ok=True)
+    
+    primary_font_name = "Arial" # 兜底名
+    
+    # 2. 循环遍历所有字体链接，依次下载并存入系统
+    for idx, url in enumerate(font_urls):
+        try:
+            print(f"正在从网盘下载第 {idx+1} 个字体...", flush=True)
+            temp_dl_path = os.path.abspath(f"{TEMP_DIR}/downloaded_font_{idx}.ttf")
+            
+            # 使用你写好的安全下载函数
+            download_file_from_gdrive(url, temp_dl_path)
+            
+            if not os.path.exists(temp_dl_path) or os.path.getsize(temp_dl_path) < 1000:
+                print(f"警告：第 {idx+1} 个字体下载失败或文件无效，已跳过。", flush=True)
+                continue
+                
+            # 直接复制进入 Linux 操作系统底层字体库
+            system_font_path = os.path.join(linux_font_dir, f"custom_font_{idx}.ttf")
+            shutil.copy(temp_dl_path, system_font_path)
+            
+            # 如果是第一个成功安装的字体，提取它的真实名称作为 ASS 模板的全局主调字体
+            if primary_font_name == "Arial":
+                fc_res = subprocess.run(["fc-query", "-f", "%{family}\n", system_font_path], capture_output=True, text=True)
+                real_font = fc_res.stdout.strip().split(',')[0].strip()
+                if real_font:
+                    primary_font_name = real_font
+        except Exception as e:
+            print(f"处理字体链接失败，跳过该字体: {e}", flush=True)
+
+    # 3. 字体全部下完后，强制刷新系统级字体缓存，让 FFmpeg 无条件扫描到这些新字体
+    print("正在向操作系统底层注册所有下载的中文字体...", flush=True)
+    subprocess.run(["fc-cache", "-fv"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    os.environ["REAL_FONT_NAME"] = primary_font_name
+    print(f"所有动态字体已注册完毕！首选主字体真名为: {os.environ['REAL_FONT_NAME']}", flush=True)
+    # ====================================================================
 
     # 解析全局视频分辨率，支持表格自定义
     resolution_raw = get_param(["视频分辨率"], global_cfg, default="1920x1080")
