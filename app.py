@@ -402,7 +402,7 @@ with st.expander("🪄 **AI 剧本智能生成器（文本草稿 ➔ 自动新�
 st.divider()
 
 # 主视窗：嵌入 Google 表格在线编辑器
-col_btn = st.columns([3, 1], vertical_alignment="center")
+col_title, col_btn = st.columns([3, 1], vertical_alignment="center")
 #with col_title:
 #    st.subheader("📋 Google Sheets 内容在线编辑视窗")
 with col_btn:
