@@ -402,10 +402,10 @@ with st.expander("🪄 **AI 剧本智能生成器（文本草稿 ➔ 自动新�
 st.divider()
 
 # 主视窗：嵌入 Google 表格在线编辑器
-col_title, col_btn = st.columns([3, 1], vertical_alignment="center")
-with col_title:
-    st.subheader("📋 Google Sheets 内容在线编辑视窗")
+col_btn = st.columns([3, 1], vertical_alignment="center")
+#with col_title:
+#    st.subheader("📋 Google Sheets 内容在线编辑视窗")
 with col_btn:
-    st.link_button("🔗 在新标签页打开表格", SHEET_EDIT_URL, use_container_width=True)
+    st.link_button("📋Google Sheets", SHEET_EDIT_URL, use_container_width=True)
 
 st.components.v1.iframe(SHEET_EMBED_URL, height=520, scrolling=True)
