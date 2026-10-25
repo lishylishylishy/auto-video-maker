@@ -29,16 +29,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ⚡ 使用全功能静态编译包（包含 drawtext 滤镜 + ffprobe），仅下载单文件，5秒极速完成
-      - name: 3. Setup Fast Complete FFmpeg
+# ⚡ 安装 Ubuntu 原生 FFmpeg 与 Fontconfig 字体引擎
+      - name: 3. Install Native FFmpeg & Fontconfig
         run: |
-          wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
-          tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz
-          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
-          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
-          rm -rf ffmpeg-master-latest-linux64-gpl*
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fontconfig fonts-noto-cjk
           ffmpeg -version
-
       - name: 4. Cache Python Dependencies
         uses: actions/cache@v4
         with:
