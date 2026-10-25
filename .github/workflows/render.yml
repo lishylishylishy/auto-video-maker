@@ -22,7 +22,8 @@ jobs:
     steps:
       - name: 1. Checkout
         uses: actions/checkout@v4
-
+        with:
+          lfs: true  # 如果你用了大文件存储，这行必须加
       - name: 2. Setup Python
         uses: actions/setup-python@v5
         with:
