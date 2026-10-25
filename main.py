@@ -1,4 +1,4 @@
-import os, re, csv, json, io, requests, subprocess, edge_tts, urllib.parse, asyncio, time, shutil
+import os, re, csv, json, io, requests, subprocess, edge_tts, urllib.parse, asyncio, time
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -104,7 +104,7 @@ def is_video_media(filepath):
     return False
 
 # ==============================================================================
-# ✂️ 2. 文本处理与样式解析
+# ✂️ 2. 文本处理与多渠道自动翻译
 # ==============================================================================
 def wrap_text_by_punctuation(text, max_len=18):
     if not text or len(text) <= max_len:
@@ -141,15 +141,45 @@ def translate_to_english(text):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    for attempt in range(2):
-        try:
-            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={urllib.parse.quote(text)}"
-            res = requests.get(url, headers=headers, timeout=8).json()
-            en_text = "".join([item[0] for item in res[0] if item[0]])
-            return en_text.strip()
-        except Exception:
-            time.sleep(1.0)
-            continue
+    encoded_text = urllib.parse.quote(text.strip())
+    
+    # 渠道 1: Google Translate GTX 接口
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q={encoded_text}"
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            en_text = "".join([item[0] for item in data[0] if item[0]])
+            if en_text.strip():
+                return en_text.strip()
+    except Exception as e:
+        print(f"  [翻译渠道1失败] {e}", flush=True)
+
+    # 渠道 2: Google Clients 备用接口
+    try:
+        url = f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=zh-CN&tl=en&q={encoded_text}"
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                res_str = data[0][0] if isinstance(data[0], list) else data[0]
+                if res_str.strip():
+                    return res_str.strip()
+    except Exception as e:
+        print(f"  [翻译渠道2失败] {e}", flush=True)
+
+    # 渠道 3: MyMemory API 免费兜底
+    try:
+        url = f"https://api.mymemory.translated.net/get?q={encoded_text}&langpair=zh-CN|en"
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            trans = data.get("responseData", {}).get("translatedText", "")
+            if trans and "MYMEMORY WARNING" not in trans:
+                return trans.strip()
+    except Exception as e:
+        print(f"  [翻译渠道3失败] {e}", flush=True)
+
     return ""
 
 def sanitize_color(color_str):
@@ -167,43 +197,6 @@ def sanitize_color(color_str):
             except ValueError: pass
     return c
 
-def parse_ass_color(color_input, default_ass="&H00FFFFFF"):
-    """ 将用户输入的颜色转为标准 ASS 颜色码 (&HAABBGGRR) """
-    if not color_input or not str(color_input).strip():
-        return default_ass
-    c = str(color_input).strip()
-    if c.startswith("&H"):
-        return c
-    sc = sanitize_color(c)
-    if sc.startswith("&H"):
-        return sc
-    
-    color_map = {
-        "white": "&H00FFFFFF",
-        "black": "&H00000000",
-        "yellow": "&H0000FFFF",
-        "red": "&H000000FF",
-        "green": "&H0000FF00",
-        "blue": "&H00FF0000",
-        "gray": "&H00808080",
-        "cyan": "&H00FFFF00",
-        "magenta": "&H00FF00FF",
-    }
-    return color_map.get(sc.lower(), default_ass)
-
-def parse_bool_to_int(val_str, default=0):
-    if not val_str:
-        return default
-    s = str(val_str).strip().lower()
-    if s in ["1", "true", "是", "开启", "yes", "on"]:
-        return 1
-    if s in ["0", "false", "否", "关闭", "no", "off"]:
-        return 0
-    try:
-        return 1 if int(float(s)) > 0 else 0
-    except ValueError:
-        return default
-
 def parse_rgb_to_ffmpeg(rgb_str):
     if not rgb_str or not str(rgb_str).strip(): return "0x0000FF"
     cleaned = str(rgb_str).replace("，", ",").strip()
@@ -216,6 +209,7 @@ def parse_rgb_to_ffmpeg(rgb_str):
     return "0x0000FF"
 
 def calc_ass_position(pos_str, is_subtitle=False):
+    """ 把位置描述转换为ASS字幕对齐方式+边距 """
     pos = str(pos_str).strip()
     alignment = 2 if is_subtitle else 5
     margin_v = 80 if is_subtitle else 0
@@ -396,10 +390,11 @@ async def generate_audio_or_silent(clip, style_cfg, global_cfg, audio_output_pat
         ]
         subprocess.run(cmd, capture_output=True, check=True)
 
-def generate_ass_subtitle(output_path, text_or_segments, font_size, color, alignment, margin_h, margin_v, duration, vid_w=1920, vid_h=1080, bold=0, outline=0, shadow=0, outline_color="black", line_spacing=8):
-    """ 生成标准 ASS 字幕文件，所有样式参数 100% 动态传参注入 """
-    ass_color = parse_ass_color(color, default_ass="&H00FFFFFF")
-    ass_outline_color = parse_ass_color(outline_color, default_ass="&H00000000")
+def generate_ass_subtitle(output_path, text_or_segments, font_size, color, alignment, margin_h, margin_v, duration, vid_w=1920, vid_h=1080, line_spacing=8):
+    """ 生成标准ASS字幕文件 """
+    ass_color = color
+    if not color.startswith("&H"):
+        ass_color = "&H00FFFFFF" if color == "white" else "&H00000000"
     
     real_font_name = os.getenv("REAL_FONT_NAME", "Arial")
 
@@ -411,7 +406,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{real_font_name},{font_size},{ass_color},&H000000FF,{ass_outline_color},&H00000000,{bold},0,0,0,100,100,0,0,1,{outline},{shadow},{alignment},{margin_h},{margin_h},{margin_v},1
+Style: Default,{real_font_name},{font_size},{ass_color},&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2,0,{alignment},{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -538,41 +533,25 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
         audio_in_idx = 1
         bgm_in_idx = 2
 
-    # --- 无声大字（从配置提取，挂载 fontsdir 保障字体） ---
+    # 无声大字（标题）
     if silent_text:
         title_text = wrap_text_by_punctuation(silent_text, max_len=14)
-        title_size = get_param(["文字-字号", "字号"], clip, style_cfg, global_cfg, default="150")
-        title_color = get_param(["文字-颜色", "颜色"], clip, style_cfg, global_cfg, default="yellow")
-        title_bold_raw = get_param(["文字-加粗", "加粗"], clip, style_cfg, global_cfg, default="0")
-        title_outline_raw = get_param(["文字-描边", "描边"], clip, style_cfg, global_cfg, default="0")
-        title_outline_color_raw = get_param(["文字-描边颜色", "描边颜色"], clip, style_cfg, global_cfg, default="black")
-        title_shadow_raw = get_param(["文字-阴影", "阴影"], clip, style_cfg, global_cfg, default="0")
-        title_pos_str = get_param(["字幕位置", "文字位置"], clip, style_cfg, global_cfg, default="居中")
-        
-        bold_val = parse_bool_to_int(title_bold_raw, default=0)
-        try: outline_val = int(float(title_outline_raw))
-        except ValueError: outline_val = 0
-        try: shadow_val = int(float(title_shadow_raw))
-        except ValueError: shadow_val = 0
-        
+        title_size = get_param(["文字-字号"], clip, style_cfg, global_cfg, default="150")
+        title_color = sanitize_color(get_param(["文字-颜色"], clip, style_cfg, global_cfg, default="yellow"))
+        title_pos_str = get_param(["字幕位置"], clip, style_cfg, global_cfg, default="居中")
         align, mh, mv = calc_ass_position(title_pos_str, is_subtitle=False)
         
         title_ass_path = os.path.abspath(f"{TEMP_DIR}/title_{index}.ass")
-        generate_ass_subtitle(
-            title_ass_path, title_text, int(float(title_size)), title_color, 
-            align, mh, mv, clip_duration, vid_w, vid_h, 
-            bold=bold_val, outline=outline_val, shadow=shadow_val, outline_color=title_outline_color_raw
-        )
-        
+        generate_ass_subtitle(title_ass_path, title_text, int(title_size), title_color, align, mh, mv, clip_duration, vid_w, vid_h)
         ff_ass_title = escape_ff_path(title_ass_path)
-        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))
-        filter_chains.append(f"{curr_v}ass={ff_ass_title}:fontsdir={ff_fonts_dir}[v_with_title]")
+        filter_chains.append(f"{curr_v}ass={ff_ass_title}[v_with_title]")
         curr_v = "[v_with_title]"
 
-    # --- 有声字幕（完全还原你的中文切分 + 自动英文翻译双语逻辑） ---
+    # 有声字幕（双语翻译 + 日志输出）
     if spoken_text:
         cn_lines = wrap_text_by_punctuation(spoken_text, max_len=21).split('\n')
-        is_bilingual = (get_param(["双语字幕"], global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
+        is_bilingual = (get_param(["双语字幕", "双语", "英文字幕"], global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
+        print(f"  [字幕调试] 是否开启双语字幕: {is_bilingual}", flush=True)
         
         sub_segments = []
         for cn_line in cn_lines:
@@ -580,10 +559,10 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
                 continue
             if is_bilingual:
                 en_line = translate_to_english(cn_line)
+                print(f"  [翻译调试] 中文: '{cn_line}' -> 英文: '{en_line}'", flush=True)
                 if en_line:
                     sub_text = f"{cn_line}\\N{en_line}"
                 else:
-                    print(f"  [提示] 句段英文翻译为空或失败，回退仅显示中文: {cn_line}", flush=True)
                     sub_text = cn_line
             else:
                 sub_text = cn_line
@@ -593,35 +572,20 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
                 "char_count": len(cn_line)
             })
         
-        sub_size = get_param(["文字-字号", "字号"], global_cfg, default="30")
-        sub_color = get_param(["文字-颜色", "颜色"], global_cfg, default="white")
-        sub_bold_raw = get_param(["文字-加粗", "加粗"], global_cfg, default="0")
-        sub_outline_raw = get_param(["文字-描边", "描边"], global_cfg, default="0")
-        sub_outline_color_raw = get_param(["文字-描边颜色", "描边颜色"], global_cfg, default="black")
-        sub_shadow_raw = get_param(["文字-阴影", "阴影"], global_cfg, default="0")
-        sub_pos_str = get_param(["字幕位置", "位置"], global_cfg, default="底部居中")
-        
-        bold_val = parse_bool_to_int(sub_bold_raw, default=0)
-        try: outline_val = int(float(sub_outline_raw))
-        except ValueError: outline_val = 0
-        try: shadow_val = int(float(sub_shadow_raw))
-        except ValueError: shadow_val = 0
-        
+        sub_size = get_param(["文字-字号"], global_cfg, default="30")
+        sub_color = sanitize_color(get_param(["文字-颜色"], global_cfg, default="white"))
+        sub_pos_str = get_param(["字幕位置"], global_cfg, default="底部居中")
         align, mh, mv = calc_ass_position(sub_pos_str, is_subtitle=True)
         
         sub_ass_path = os.path.abspath(f"{TEMP_DIR}/sub_{index}.ass")
-        generate_ass_subtitle(
-            sub_ass_path, sub_segments, int(float(sub_size)), sub_color, 
-            align, mh, mv, clip_duration, vid_w, vid_h,
-            bold=bold_val, outline=outline_val, shadow=shadow_val, outline_color=sub_outline_color_raw
-        )
+        generate_ass_subtitle(sub_ass_path, sub_segments, int(sub_size), sub_color, align, mh, mv, clip_duration, vid_w, vid_h)
         
         ff_ass_sub = escape_ff_path(sub_ass_path)
-        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))
-        filter_chains.append(f"{curr_v}ass={ff_ass_sub}:fontsdir={ff_fonts_dir}[outv]")
+        filter_chains.append(f"{curr_v}ass={ff_ass_sub}[outv]")
     else:
         filter_chains.append(f"{curr_v}null[outv]")
 
+    # 音频混合
     bgm_vol = get_param(["BGM音量"], clip, style_cfg, global_cfg, default="1.0")
     try: vol_val = float(bgm_vol)
     except ValueError: vol_val = 1.0
@@ -655,7 +619,6 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
 async def main():
     os.makedirs(TEMP_DIR, exist_ok=True)
     
-    # 指向 Linux 系统的全局 Fontconfig 配置（双保险）
     os.environ["FONTCONFIG_PATH"] = "/etc/fonts"
     os.environ["FONTCONFIG_FILE"] = "/etc/fonts/fonts.conf"
     
@@ -677,40 +640,39 @@ async def main():
 
     font_urls = [url.strip() for url in re.split(r'[,;|\s]+', drive_font_url_raw) if url.strip()]
     
+    import shutil
     linux_font_dir = os.path.expanduser("~/.local/share/fonts")
     os.makedirs(linux_font_dir, exist_ok=True)
     
-    primary_font_name = ""
+    primary_font_name = "Arial"
     
     for idx, url in enumerate(font_urls):
         try:
             print(f"正在从网盘下载第 {idx+1} 个字体...", flush=True)
-            # 1. 下载到临时工作区（供 :fontsdir 直接查找）
             temp_dl_path = os.path.abspath(f"{TEMP_DIR}/downloaded_font_{idx}.ttf")
+            
             download_file_from_gdrive(url, temp_dl_path)
             
             if not os.path.exists(temp_dl_path) or os.path.getsize(temp_dl_path) < 1000:
                 print(f"警告：第 {idx+1} 个字体下载失败或文件无效，已跳过。", flush=True)
                 continue
-            
-            # 2. 同时复制到 Linux 系统字体库目录
+                
             system_font_path = os.path.join(linux_font_dir, f"custom_font_{idx}.ttf")
             shutil.copy(temp_dl_path, system_font_path)
             
-            # 3. 精准解析字体内部名
-            fc_res = subprocess.run(["fc-query", "-f", "%{family}\n", system_font_path], capture_output=True, text=True)
-            families = [f.strip() for f in fc_res.stdout.strip().split(',') if f.strip()]
-            
-            if families and not primary_font_name:
-                primary_font_name = families[0]
-                print(f"第 {idx+1} 个字体注册成功！识别到内部真名为: [{primary_font_name}]", flush=True)
+            if primary_font_name == "Arial":
+                fc_res = subprocess.run(["fc-query", "-f", "%{family}\n", system_font_path], capture_output=True, text=True)
+                real_font = fc_res.stdout.strip().split(',')[0].strip()
+                if real_font:
+                    primary_font_name = real_font
         except Exception as e:
-            print(f"处理字体链接失败: {e}", flush=True)
+            print(f"处理字体链接失败，跳过该字体: {e}", flush=True)
 
+    print("正在向操作系统底层注册所有下载的中文字体...", flush=True)
     subprocess.run(["fc-cache", "-fv"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    os.environ["REAL_FONT_NAME"] = primary_font_name if primary_font_name else "Arial"
-    print(f"【最终样式】ASS 字幕注入的主字体真名为: [{os.environ['REAL_FONT_NAME']}]", flush=True)
+    os.environ["REAL_FONT_NAME"] = primary_font_name
+    print(f"所有动态字体已注册完毕！首选主字体真名为: {os.environ['REAL_FONT_NAME']}", flush=True)
 
     resolution_raw = get_param(["视频分辨率"], global_cfg, default="1920x1080")
     try:
