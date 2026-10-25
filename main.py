@@ -408,7 +408,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(ass_content)
     return output_path
-
+    
+def escape_ff_path(p):#增加识别字体代码
+    return p.replace('\\', '/').replace(':', '\\:')#增加识别字体代码
 def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, audio_file, output_path):
     print(f"[Render] 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
     
@@ -522,7 +524,9 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
         
         title_ass_path = os.path.abspath(f"{TEMP_DIR}/title_{index}.ass")
         generate_ass_subtitle(title_ass_path, title_text, int(title_size), title_color, align, mh, mv, clip_duration, vid_w, vid_h)
-        filter_chains.append(f"{curr_v}ass={title_ass_path}[v_with_title]")
+        ff_ass_title = escape_ff_path(title_ass_path)#增加识别字体代码
+        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))#增加识别字体代码
+        filter_chains.append(f"{curr_v}ass={ff_ass_title}:fontsdir={ff_fonts_dir}[v_with_title]")#增加识别字体代码
         curr_v = "[v_with_title]"
 
     # 有声字幕（严格仅用全局配置）
@@ -560,7 +564,9 @@ def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, aud
         # 传入 sub_segments 数组，由 generate_ass_subtitle 自动计算分段排期
         generate_ass_subtitle(sub_ass_path, sub_segments, int(sub_size), sub_color, align, mh, mv, clip_duration, vid_w, vid_h)
         
-        filter_chains.append(f"{curr_v}ass={sub_ass_path}[outv]")
+        ff_ass_sub = escape_ff_path(sub_ass_path)#增加识别字体代码
+        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))#增加识别字体代码
+        filter_chains.append(f"{curr_v}ass={ff_ass_sub}:fontsdir={ff_fonts_dir}[outv]")#增加识别字体代码
     else:
         filter_chains.append(f"{curr_v}null[outv]")
 
@@ -627,13 +633,15 @@ async def main():
     # 提前注册字体路径到环境变量，确保ASS滤镜能找到
     os.environ["FC_CONFIG_DIR"] = TEMP_DIR
     # 生成fonts.conf让FFmpeg识别自定义字体
+    unix_temp_dir = os.path.abspath(TEMP_DIR).replace('\\', '/')#增加识别字体代码
+    unix_font_path = os.path.abspath(font_path).replace('\\', '/')#增加识别字体代码
     font_conf = f"""<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
 <fontconfig>
-  <dir>{os.path.dirname(font_path)}</dir>
+  <dir>{unix_temp_dir}</dir>
   <match target="pattern">
     <test qual="any" name="family"><string>CustomFont</string></test>
-    <edit name="file" mode="assign"><string>{font_path}</string></edit>
+    <edit name="file" mode="assign"><string>{unix_font_path}</string></edit>
   </match>
 </fontconfig>
 """
