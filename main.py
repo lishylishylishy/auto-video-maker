@@ -565,9 +565,8 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
         )
         
         ff_ass_title = escape_ff_path(title_ass_path)
-        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))
-        # 挂载 :fontsdir={ff_fonts_dir} 保证 libass 引擎直接找到临时字体库
-        filter_chains.append(f"{curr_v}ass={ff_ass_title}:fontsdir={ff_fonts_dir}[v_with_title]")
+        # 标准原生字幕挂载
+        filter_chains.append(f"{curr_v}ass={ff_ass_title}[v_with_title]")
         curr_v = "[v_with_title]"
 
     # --- 有声字幕（彻底由配置驱动，缺失则优雅归 0） ---
@@ -614,9 +613,8 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
         )
         
         ff_ass_sub = escape_ff_path(sub_ass_path)
-        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))
-        # 挂载 :fontsdir={ff_fonts_dir} 保证 libass 引擎直接找到临时字体库
-        filter_chains.append(f"{curr_v}ass={ff_ass_sub}:fontsdir={ff_fonts_dir}[outv]")
+        # 标准原生字幕挂载
+        filter_chains.append(f"{curr_v}ass={ff_ass_sub}[outv]")
     else:
         filter_chains.append(f"{curr_v}null[outv]")
 
@@ -652,10 +650,6 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
 # ==============================================================================
 async def main():
     os.makedirs(TEMP_DIR, exist_ok=True)
-    
-    # 修正 BtbN 静态 FFmpeg 无法读取系统 Fontconfig 配置的问题
-    os.environ["FONTCONFIG_PATH"] = "/etc/fonts"
-    os.environ["FONTCONFIG_FILE"] = "/etc/fonts/fonts.conf"
     
     print("开始读取 Google 表格配置...", flush=True)
     
@@ -705,6 +699,7 @@ async def main():
         except Exception as e:
             print(f"处理字体链接失败: {e}", flush=True)
 
+    # 刷新 Linux 操作系统级别的字体索引
     subprocess.run(["fc-cache", "-fv"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     os.environ["REAL_FONT_NAME"] = primary_font_name if primary_font_name else "Arial"
