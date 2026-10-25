@@ -492,3 +492,261 @@ def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, ou
             bgm_level = "global"
     
     path_bgm = resolve_asset_path(raw_bgm)
+    has_bgm = bool(path_bgm and os.path.exists(path_bgm))
+    if has_bgm:
+        if bgm_level == "global":
+            cmd.extend(["-stream_loop", "-1", "-i", path_bgm])
+        else:
+            cmd.extend(["-i", path_bgm])
+
+    filter_chains = []
+    filter_chains.append(f"[0:v]setpts=PTS-STARTPTS,scale={vid_w}:{vid_h}:force_original_aspect_ratio=increase,crop={vid_w}:{vid_h}[bg_base]")
+    
+    if has_layer1:
+        chroma_rgb = get_param(["挂件-扣图RGB", "绿幕扣图RGB"], clip, style_cfg, global_cfg, default="0,0,255")
+        chroma_color = parse_rgb_to_ffmpeg(chroma_rgb)
+        overlay_pos_str = get_param(["挂件-位置", "贴图位置"], clip, style_cfg, global_cfg, default="居中")
+        scale_str = get_param(["挂件-缩放", "贴图缩放"], clip, style_cfg, global_cfg, default="50%").replace("%", "").strip()
+        try: scale_ratio = float(scale_str) / 100.0
+        except ValueError: scale_ratio = 0.50
+        target_overlay_w = int(vid_w * scale_ratio)
+        pos_expr = ""
+        pos = overlay_pos_str.strip()
+        if pos in ["居中", "居中居中"]:
+            pos_expr = "x=(W-w)/2:y=(H-h)/2"
+        elif "底部" in pos:
+            pos_expr = "x=(W-w)/2:y=H-h-80"
+        elif "绝对坐标" in pos:
+            match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
+            if match:
+                pos_expr = f"x={match.group(1)}:y={match.group(2)}"
+        elif "居中偏" in pos or "居中偏移" in pos:
+            match = re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', pos)
+            if match:
+                ox, oy = float(match.group(1)), float(match.group(2))
+                pos_expr = f"x=(W-w)/2+{ox:g}:y=(H-h)/2+{oy:g}"
+        else:
+            pos_expr = "x=(W-w)/2:y=(H-h)/2"
+        
+        filter_chains.append(f"[1:v]setpts=PTS-STARTPTS,scale={target_overlay_w}:-1,colorkey={chroma_color}:0.3:0.2[l1]")
+        filter_chains.append(f"[bg_base][l1]overlay={pos_expr}[bg_with_layer]")
+        curr_v = "[bg_with_layer]"
+        audio_in_idx = 2
+        bgm_in_idx = 3
+    else:
+        curr_v = "[bg_base]"
+        audio_in_idx = 1
+        bgm_in_idx = 2
+
+    # --- 无声大字（从配置提取，挂载 fontsdir 保障字体） ---
+    if silent_text:
+        title_text = wrap_text_by_punctuation(silent_text, max_len=14)
+        title_size = get_param(["文字-字号", "字号"], clip, style_cfg, global_cfg, default="150")
+        title_color = get_param(["文字-颜色", "颜色"], clip, style_cfg, global_cfg, default="yellow")
+        title_bold_raw = get_param(["文字-加粗", "加粗"], clip, style_cfg, global_cfg, default="0")
+        title_outline_raw = get_param(["文字-描边", "描边"], clip, style_cfg, global_cfg, default="0")
+        title_outline_color_raw = get_param(["文字-描边颜色", "描边颜色"], clip, style_cfg, global_cfg, default="black")
+        title_shadow_raw = get_param(["文字-阴影", "阴影"], clip, style_cfg, global_cfg, default="0")
+        title_pos_str = get_param(["字幕位置", "文字位置"], clip, style_cfg, global_cfg, default="居中")
+        
+        bold_val = parse_bool_to_int(title_bold_raw, default=0)
+        try: outline_val = int(float(title_outline_raw))
+        except ValueError: outline_val = 0
+        try: shadow_val = int(float(title_shadow_raw))
+        except ValueError: shadow_val = 0
+        
+        align, mh, mv = calc_ass_position(title_pos_str, is_subtitle=False)
+        
+        title_ass_path = os.path.abspath(f"{TEMP_DIR}/title_{index}.ass")
+        generate_ass_subtitle(
+            title_ass_path, title_text, int(float(title_size)), title_color, 
+            align, mh, mv, clip_duration, vid_w, vid_h, 
+            bold=bold_val, outline=outline_val, shadow=shadow_val, outline_color=title_outline_color_raw
+        )
+        
+        ff_ass_title = escape_ff_path(title_ass_path)
+        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))
+        filter_chains.append(f"{curr_v}ass={ff_ass_title}:fontsdir={ff_fonts_dir}[v_with_title]")
+        curr_v = "[v_with_title]"
+
+    # --- 有声字幕（完全还原你的中文切分 + 自动英文翻译双语逻辑） ---
+    if spoken_text:
+        cn_lines = wrap_text_by_punctuation(spoken_text, max_len=21).split('\n')
+        is_bilingual = (get_param(["双语字幕"], global_cfg, default="开启").lower() in ["开启", "是", "true", "1", "on"])
+        
+        sub_segments = []
+        for cn_line in cn_lines:
+            if not cn_line.strip():
+                continue
+            if is_bilingual:
+                en_line = translate_to_english(cn_line)
+                if en_line:
+                    sub_text = f"{cn_line}\\N{en_line}"
+                else:
+                    print(f"  [提示] 句段英文翻译为空或失败，回退仅显示中文: {cn_line}", flush=True)
+                    sub_text = cn_line
+            else:
+                sub_text = cn_line
+                
+            sub_segments.append({
+                "text": sub_text, 
+                "char_count": len(cn_line)
+            })
+        
+        sub_size = get_param(["文字-字号", "字号"], global_cfg, default="30")
+        sub_color = get_param(["文字-颜色", "颜色"], global_cfg, default="white")
+        sub_bold_raw = get_param(["文字-加粗", "加粗"], global_cfg, default="0")
+        sub_outline_raw = get_param(["文字-描边", "描边"], global_cfg, default="0")
+        sub_outline_color_raw = get_param(["文字-描边颜色", "描边颜色"], global_cfg, default="black")
+        sub_shadow_raw = get_param(["文字-阴影", "阴影"], global_cfg, default="0")
+        sub_pos_str = get_param(["字幕位置", "位置"], global_cfg, default="底部居中")
+        
+        bold_val = parse_bool_to_int(sub_bold_raw, default=0)
+        try: outline_val = int(float(sub_outline_raw))
+        except ValueError: outline_val = 0
+        try: shadow_val = int(float(sub_shadow_raw))
+        except ValueError: shadow_val = 0
+        
+        align, mh, mv = calc_ass_position(sub_pos_str, is_subtitle=True)
+        
+        sub_ass_path = os.path.abspath(f"{TEMP_DIR}/sub_{index}.ass")
+        generate_ass_subtitle(
+            sub_ass_path, sub_segments, int(float(sub_size)), sub_color, 
+            align, mh, mv, clip_duration, vid_w, vid_h,
+            bold=bold_val, outline=outline_val, shadow=shadow_val, outline_color=sub_outline_color_raw
+        )
+        
+        ff_ass_sub = escape_ff_path(sub_ass_path)
+        ff_fonts_dir = escape_ff_path(os.path.abspath(TEMP_DIR))
+        filter_chains.append(f"{curr_v}ass={ff_ass_sub}:fontsdir={ff_fonts_dir}[outv]")
+    else:
+        filter_chains.append(f"{curr_v}null[outv]")
+
+    bgm_vol = get_param(["BGM音量"], clip, style_cfg, global_cfg, default="1.0")
+    try: vol_val = float(bgm_vol)
+    except ValueError: vol_val = 1.0
+    
+    if has_bgm:
+        filter_chains.append(f"[{audio_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[a_tts]")
+        filter_chains.append(f"[{bgm_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={vol_val}[a_bgm]")
+        filter_chains.append("[a_tts][a_bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[outa]")
+    else:
+        filter_chains.append(f"[{audio_in_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[outa]")
+
+    filter_complex = ";".join(filter_chains)
+    
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        "-t", f"{clip_duration:.2f}",
+        "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+        output_path
+    ])
+    
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"Clip {index} FFmpeg 错误日志:\n{res.stderr}", flush=True)
+        raise subprocess.CalledProcessError(res.returncode, cmd, output=res.stdout, stderr=res.stderr)
+
+# ==============================================================================
+# 🚀 5. 主程序入口
+# ==============================================================================
+async def main():
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    
+    # 指向 Linux 系统的全局 Fontconfig 配置（双保险）
+    os.environ["FONTCONFIG_PATH"] = "/etc/fonts"
+    os.environ["FONTCONFIG_FILE"] = "/etc/fonts/fonts.conf"
+    
+    print("开始读取 Google 表格配置...", flush=True)
+    
+    rules_csv = get_google_sheet_tab_csv(SHEET_URL, RULES_TAB_NAME)
+    script_csv = get_google_sheet_tab_csv(SHEET_URL, SCRIPT_TAB_NAME)
+    
+    global_cfg, styles_cfg = parse_rules_tab(rules_csv)
+    clips = parse_script_tab(script_csv)
+    
+    if not clips:
+        raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
+    
+    # ================= 动态字体下载与安装 =================
+    drive_font_url_raw = get_param(["字体"], global_cfg, default="")
+    if not drive_font_url_raw:
+        raise ValueError("请在 Google Sheets 的全局配置中填写字体的 Google Drive 链接")
+
+    font_urls = [url.strip() for url in re.split(r'[,;|\s]+', drive_font_url_raw) if url.strip()]
+    
+    linux_font_dir = os.path.expanduser("~/.local/share/fonts")
+    os.makedirs(linux_font_dir, exist_ok=True)
+    
+    primary_font_name = ""
+    
+    for idx, url in enumerate(font_urls):
+        try:
+            print(f"正在从网盘下载第 {idx+1} 个字体...", flush=True)
+            # 1. 下载到临时工作区（供 :fontsdir 直接查找）
+            temp_dl_path = os.path.abspath(f"{TEMP_DIR}/downloaded_font_{idx}.ttf")
+            download_file_from_gdrive(url, temp_dl_path)
+            
+            if not os.path.exists(temp_dl_path) or os.path.getsize(temp_dl_path) < 1000:
+                print(f"警告：第 {idx+1} 个字体下载失败或文件无效，已跳过。", flush=True)
+                continue
+            
+            # 2. 同时复制到 Linux 系统字体库目录
+            system_font_path = os.path.join(linux_font_dir, f"custom_font_{idx}.ttf")
+            shutil.copy(temp_dl_path, system_font_path)
+            
+            # 3. 精准解析字体内部名
+            fc_res = subprocess.run(["fc-query", "-f", "%{family}\n", system_font_path], capture_output=True, text=True)
+            families = [f.strip() for f in fc_res.stdout.strip().split(',') if f.strip()]
+            
+            if families and not primary_font_name:
+                primary_font_name = families[0]
+                print(f"第 {idx+1} 个字体注册成功！识别到内部真名为: [{primary_font_name}]", flush=True)
+        except Exception as e:
+            print(f"处理字体链接失败: {e}", flush=True)
+
+    subprocess.run(["fc-cache", "-fv"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    os.environ["REAL_FONT_NAME"] = primary_font_name if primary_font_name else "Arial"
+    print(f"【最终样式】ASS 字幕注入的主字体真名为: [{os.environ['REAL_FONT_NAME']}]", flush=True)
+
+    resolution_raw = get_param(["视频分辨率"], global_cfg, default="1920x1080")
+    try:
+        vid_w, vid_h = [int(x) for x in resolution_raw.lower().split("x")]
+    except Exception:
+        vid_w, vid_h = 1920, 1080
+
+    video_segments = []
+    for idx, clip in enumerate(clips, 1):
+        v_seg = f"{TEMP_DIR}/clip_{idx}.mp4"
+        a_seg = f"{TEMP_DIR}/clip_{idx}.mp3"
+        style_cfg = styles_cfg.get(clip["chapter"], {})
+        await generate_audio_or_silent(clip, style_cfg, global_cfg, a_seg)
+        render_clip(idx, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file=a_seg, output_path=v_seg)
+        video_segments.append(v_seg)
+
+    print("所有片段渲染完成，开始合并视频...", flush=True)
+    
+    concat_inputs = []
+    filter_parts = []
+    for i, seg in enumerate(video_segments):
+        concat_inputs.extend(["-i", seg])
+        filter_parts.append(f"[{i}:v][{i}:a]")
+    
+    concat_filter = "".join(filter_parts) + f"concat=n={len(video_segments)}:v=1:a=1[outv][outa]"
+    
+    final_cmd = ["ffmpeg", "-y"] + concat_inputs + [
+        "-filter_complex", concat_filter,
+        "-map", "[outv]", "-map", "[outa]",
+        "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+        OUTPUT_VIDEO_NAME
+    ]
+    
+    subprocess.run(final_cmd, check=True)
+    print("视频渲染成功导出！", flush=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
