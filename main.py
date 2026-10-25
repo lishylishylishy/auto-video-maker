@@ -609,16 +609,20 @@ async def main():
         raise ValueError(f"未在 Tab 页【{SCRIPT_TAB_NAME}】中解析出任何有效剧本内容。")
     
     # 字体加载：强制校验，失败直接终止
+    # 1. 直接从 Google Sheets 拿到字体网盘链接
     drive_font_url = get_param(["字体"], global_cfg, default="")
     if not drive_font_url:
-        raise ValueError("config表全局配置中未找到「字体」字段，请填写字体的Google Drive链接")
-    
+        raise ValueError("请在 Google Sheets 的全局配置中填写字体的 Google Drive 链接")
+
     font_path = os.path.abspath(f"{TEMP_DIR}/custom_font.ttf")
-    print("正在下载 Google Drive 自定义字体...", flush=True)
+    print(f"正在从网盘下载字体...", flush=True)
+
+    # 2. 直接按网盘链接下载
     download_file_from_gdrive(drive_font_url, font_path)
-    
+
+    # 3. 简单拦一下错（只要文件下出来了且不是0KB空文件，就放行）
     if not os.path.exists(font_path) or os.path.getsize(font_path) < 1000:
-        raise RuntimeError("字体文件下载失败，请检查字体链接的分享权限")
+        raise RuntimeError("字体下载失败，请检查你的 Google Drive 链接是否公开且正确！")
     
     # 提前注册字体路径到环境变量，确保ASS滤镜能找到
     os.environ["FC_CONFIG_DIR"] = TEMP_DIR
