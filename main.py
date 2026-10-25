@@ -370,6 +370,9 @@ def generate_ass_subtitle(output_path, text_or_segments, font_size, color, align
     if not color.startswith("&H"):
         ass_color = "&H00FFFFFF" if color == "white" else "&H00000000"
     
+# 动态获取环境变量中的真实字体名，兜底使用 Arial
+    real_font_name = os.getenv("REAL_FONT_NAME", "Arial")
+
     ass_content = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {vid_w}
@@ -378,7 +381,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,CustomFont,{font_size},{ass_color},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,{alignment},{margin_h},{margin_h},{margin_v},1
+Style: Default,{real_font_name},{font_size},{ass_color},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,{alignment},{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -630,24 +633,16 @@ async def main():
     if not os.path.exists(font_path) or os.path.getsize(font_path) < 1000:
         raise RuntimeError("字体下载失败，请检查你的 Google Drive 链接是否公开且正确！")
     
-    # 提前注册字体路径到环境变量，确保ASS滤镜能找到
-    os.environ["FC_CONFIG_DIR"] = TEMP_DIR
-    # 生成fonts.conf让FFmpeg识别自定义字体
-    unix_temp_dir = os.path.abspath(TEMP_DIR).replace('\\', '/')#增加识别字体代码
-    unix_font_path = os.path.abspath(font_path).replace('\\', '/')#增加识别字体代码
-    font_conf = f"""<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-<fontconfig>
-  <dir>{unix_temp_dir}</dir>
-  <match target="pattern">
-    <test qual="any" name="family"><string>CustomFont</string></test>
-    <edit name="file" mode="assign"><string>{unix_font_path}</string></edit>
-  </match>
-</fontconfig>
-"""
-    with open(f"{TEMP_DIR}/fonts.conf", "w", encoding="utf-8") as f:
-        f.write(font_conf)
-    os.environ["FONTCONFIG_FILE"] = os.path.abspath(f"{TEMP_DIR}/fonts.conf")
+# 动态获取字体的内部真实名称，存入环境变量供生成 ASS 时使用
+    try:
+        # GitHub Actions 自带 fc-query 工具，精准提取字体出厂真名
+        fc_res = subprocess.run(["fc-query", "-f", "%{family}\n", font_path], capture_output=True, text=True)
+        real_font = fc_res.stdout.strip().split(',')[0].strip()
+        os.environ["REAL_FONT_NAME"] = real_font if real_font else "Arial"
+        print(f"成功识别动态字体真名: {os.environ['REAL_FONT_NAME']}", flush=True)
+    except Exception as e:
+        print(f"提取字体名称失败，使用兜底字体: {e}", flush=True)
+        os.environ["REAL_FONT_NAME"] = "Arial"
 
     # 解析全局视频分辨率，支持表格自定义
     resolution_raw = get_param(["视频分辨率"], global_cfg, default="1920x1080")
