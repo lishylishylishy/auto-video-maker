@@ -414,7 +414,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     
 def escape_ff_path(p):#增加识别字体代码
     return p.replace('\\', '/').replace(':', '\\:')#增加识别字体代码
-def render_clip(index, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, audio_file, output_path):
+def render_clip(index, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file, output_path):
     print(f"[Render] 正在渲染第 {index} 个切片片段 [{clip['chapter']}]...", flush=True)
     
     spoken_text = clip["spoken_text"].strip()
@@ -679,7 +679,7 @@ async def main():
         a_seg = f"{TEMP_DIR}/clip_{idx}.mp3"
         style_cfg = styles_cfg.get(clip["chapter"], {})
         await generate_audio_or_silent(clip, style_cfg, global_cfg, a_seg)
-        render_clip(idx, clip, style_cfg, global_cfg, font_path, vid_w, vid_h, audio_file=a_seg, output_path=v_seg)
+        render_clip(idx, clip, style_cfg, global_cfg, vid_w, vid_h, audio_file=a_seg, output_path=v_seg)
         video_segments.append(v_seg)
 
 
