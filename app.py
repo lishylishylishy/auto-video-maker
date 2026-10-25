@@ -356,9 +356,9 @@ with st.sidebar:
 # 顶部模块：AI 剧本生成
 with st.expander("🪄 **AI 剧本智能生成器（文本草稿 ➔ 自动新建 script 表格）**", expanded=True):
     raw_draft = st.text_area(
-        "粘贴你的原始文章 / 文案草稿：",
-        placeholder="例如：有一个狐狸在森林中游玩，他走啊走，来到一个小池塘，这里一只青蛙趴在荷叶上休息...",
-        height=120
+        "粘贴你的草稿：",
+        placeholder="例如：有一个狐狸在森林中游玩，他走啊走...",
+        height=150
     )
     
     col_1, col_2, col_3 = st.columns([2, 1, 1])
